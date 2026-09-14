@@ -1,98 +1,106 @@
 # Qwen3.8-Next-Flash toolbox — AMD Strix Halo (`gfx1151`)
 
-Everything needed to build and serve **Qwen3.8-Flash-Next (177B)** on a 128 GB Strix Halo
-machine with the ROCm/HIP stack from
-[`pwilkin/strix-halo`](https://github.com/pwilkin/strix-halo), inside Docker.
+Serve **Qwen3.8-Flash-Next (177B)** on a 128 GB Ryzen AI Max / Max+ (Radeon 8060S, `gfx1151`)
+with the ROCm/HIP stack from [`pwilkin/strix-halo`](https://github.com/pwilkin/strix-halo), in
+Docker. Nothing is installed as root on the host and the host's `/opt/rocm` is never touched.
 
-Only assumption about your machine: **Linux, Docker (+ Compose v2), rootless or rootful,
-Ryzen AI Max / Max+ with a Radeon 8060S (`gfx1151`) and 128 GB of unified memory.**
+You need: Linux x86_64 with `amdgpu` loaded, Docker + Compose v2, 128 GB unified memory,
+~110 GiB free for the weights (plus ~9 GB image and ~3 GiB build state).
 
-> The container recipe is taken from
-> [kyuz0/amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes): the
-> Fedora 44 base, AMD's `amdrocm{,-core-devel}10.0-gfx1151` package sets, the `/opt/rocm/core*`
-> symlink layout and the Compose device flags all come from there. What is added here is the
-> `pwilkin/strix-halo` build itself, driven by its own installer.
-
----
+> Container recipe — Fedora 44 base, AMD's `amdrocm{,-core-devel}10.0-gfx1151` package sets, the
+> `/opt/rocm/core*` layout, Compose device flags — comes from
+> [kyuz0/amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes). What is
+> added here is the `pwilkin/strix-halo` build itself, driven by its own installer.
 
 ## Table of contents
 
-1. [What you get](#1-what-you-get)
-2. [Why a container](#2-why-a-container)
+1. [Quick start](#1-quick-start)
+2. [What you get](#2-what-you-get)
 3. [Host requirements](#3-host-requirements)
-4. [Repository layout](#4-repository-layout)
-5. [Configure](#5-configure)
-6. [Build the image](#6-build-the-image)
-7. [Build the stack and prepare the weights](#7-build-the-stack-and-prepare-the-weights)
-8. [Run llama-server](#8-run-llama-server)
+4. [Configure](#4-configure)
+5. [Build the image](#5-build-the-image)
+6. [Build the stack and download weights](#6-build-the-stack-and-download-weights)
+7. [Run llama-server](#7-run-llama-server)
+8. [Other weights and arbitrary models](#8-other-weights-and-arbitrary-models)
 9. [Tuning](#9-tuning)
-10. [Arbitrary models](#10-arbitrary-models)
-11. [Rootless vs rootful Docker](#11-rootless-vs-rootful-docker)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Reference](#13-reference)
+10. [Rootless vs rootful Docker](#10-rootless-vs-rootful-docker)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Reference](#12-reference)
 
 ---
 
-## 1. What you get
+## 1. Quick start
+
+```bash
+cp .env.example .env                  # 1. config; defaults are fine for rootless Docker
+docker compose build setup            # 2. image (~9 GB, needs network)
+./pull-models.sh                      # 3. compile ROCr/HIP/llama.cpp + download ~96 GiB weights
+docker compose up -d server           # 4. serve on http://localhost:8080
+curl -s localhost:8080/health         # {"status":"ok"} once loaded — loading 93 GiB takes a while
+```
+
+Step 3 compiles in under 10 minutes at `JOBS=16`; the rest is download-bound. It is **resumable** —
+interrupt and rerun any time.
+
+Chat with it:
+
+```bash
+curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Introduce Strix Halo in one line."}],"max_tokens":64}'
+```
+
+Point any OpenAI-compatible client at `http://localhost:8080/v1`. The first request after a start is
+slow: weights are read on demand, so pages are cold.
+
+Before step 1, fix these if they apply to you:
+
+* **Rootful (system) Docker** → set `STRIX_USER=$(id -u):$(id -g)` in `.env`; see
+  [rootless vs rootful](#10-rootless-vs-rootful-docker).
+* **`/dev/kfd` not readable** → `sudo usermod -aG render,video $USER`, log out and back in.
+* **`max locked memory`** → `ulimit -l` should be `unlimited`; a rootless daemon cannot raise it
+  above its own limit (systemd drop-in).
+* **Not a 128 GB Strix Halo** → this profile will not fit. On the same container the smaller
+  `qwen38-27b` profile works: [27B variant](#the-27b-variant).
+
+Everything below explains those commands and the knobs you can turn.
+
+## 2. What you get
 
 | Layer | Source | Result |
 | :-- | :-- | :-- |
-| ROCr runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — adds retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
+| ROCr runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
 | HIP runtime | same fork, `projects/clr` + `projects/hip` | `libamdhip64.so.7.16`, built into the state directory |
 | Engine | `pwilkin/llama.cpp@strix-halo` (`d67d5883`) — UMA scheduler ring, wave32 `TOP_K`, gfx1151 tuning, MTP speculative decoding | `llama-server`, `llama-bench`, `test-backend-sched-ring` |
 | Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB). Text only, no vision projector |
-| ROCm SDK | AMD's Core SDK 10.0 (TheRock stream), `amdrocm{,-core-devel}10.0-gfx1151` | `hipcc`, AMD LLVM, rocBLAS/hipBLAS with gfx1151 kernels, `amd_comgr`, `rocprofiler-register` |
+| ROCm SDK | AMD Core SDK 10.0 (TheRock stream), `amdrocm{,-core-devel}10.0-gfx1151` | `hipcc`, AMD LLVM, rocBLAS/hipBLAS with gfx1151 kernels, `amd_comgr`, `rocprofiler-register` |
 
-Upstream's published numbers for this exact configuration on one Radeon 8060S, 16384-token
-batch and ubatch:
+Upstream's numbers for this configuration on one Radeon 8060S, 16384 batch/ubatch:
 
 | Context depth | Prefill t/s | Decode t/s |
 | :-- | --: | --: |
 | 0 | 1204.31 ± 2.31 | 26.28 ± 0.29 |
 | 40 000 | 1086.29 ± 0.96 | 16.63 ± 0.14 |
 
-Prefill is the tuned path; upstream states decode is not yet where it should be.
-
-## 2. Why a container
-
-The installer needs a **complete, current ROCm SDK** under a single `$ROCM_ROOT`: `hipcc`,
-an AMD LLVM (`clang++`, `llvm-mc`) and the cmake packages `hip`, `hipblas`, `rocblas`,
-`amd_comgr`, `rocprofiler-register`. It then compiles its own ROCr and HIP on top of that
-SDK and points `llama.cpp` at the results, while `rocBLAS`/`hipBLAS` keep coming from the
-SDK at runtime.
-
-That SDK has to be recent — the fork is rebased on ROCm 10 (`HIP 7.16`, `libamdhip64.so.7`)
-— and most distributions either package an older ROCm or do not package it at all. AMD only
-publishes ROCm 10 as Fedora/RHEL and Ubuntu packages, so the toolbox is a Fedora 44 image fed from
-`stable.repo.amd.com`. The host contributes nothing but the `amdgpu` kernel driver and
-firmware, and its own ROCm installation (if any) is never touched or shadowed.
-
-Nothing is installed as root on the host, and `/opt/rocm` on the host is never modified.
+Prefill is the tuned path; upstream says decode is not where it should be yet.
 
 ## 3. Host requirements
 
-* Linux x86_64, `amdgpu` loaded, `gfx1151` visible in the KFD topology, `gc_11_5_0` firmware
-  present (a kernel from 2025 or newer is a safe bet for Strix Halo).
-* Your user can open the compute devices — this is what the container inherits:
+```bash
+test -r /dev/kfd -a -w /dev/kfd && echo "kfd ok"
+ls -l /dev/dri/renderD*
+awk '$1 == "gfx_target_version" && $2 != 0 { print $2 }' \
+    /sys/class/kfd/kfd/topology/nodes/*/properties      # want: 110501
+```
 
-  ```bash
-  test -r /dev/kfd -a -w /dev/kfd && echo "kfd ok"
-  ls -l /dev/dri/renderD*
-  awk '$1 == "gfx_target_version" && $2 != 0 { print $2 }' \
-      /sys/class/kfd/kfd/topology/nodes/*/properties      # want: 110501
-  ```
+* `amdgpu` loaded, `gfx1151` visible in the KFD topology, `gc_11_5_0` firmware present — a kernel
+  from 2025 or newer is a safe bet. The container inherits whatever your user can open.
+* Docker Engine with the Compose v2 plugin; `memlock` as high as possible.
+* Disk: ~110 GiB for weights (96 GiB + headroom) and ~3 GiB for build state. Both directories may
+  live anywhere — they are bind-mounted.
+* 128 GB unified memory. The model does not fit in 64 GB; there is no smaller profile to fall back
+  to here (see [the 27B variant](#the-27b-variant)).
 
-  If the first line fails, add yourself to the `render` (and usually `video`) groups and log
-  out and back in.
-* `ulimit -l` (`max locked memory`) as large as possible, ideally `unlimited`. Compose raises
-  the container's limit, but a rootless daemon cannot raise it above its own limit.
-* Docker Engine with the Compose v2 plugin.
-* Disk: approx. 96 GiB for the weights plus approx. 10 GiB of headroom, and approx. 3 GiB for the build state.
-  Both directories may live anywhere; they are bind-mounted.
-* 128 GB of unified memory. The model does not fit in 64 GB — there is no smaller profile to
-  fall back to here (see [the 27B variant](#switching-to-the-27b-variant) instead).
-
-Check the whole stack of host prerequisites without building anything:
+Check the whole chain without building anything:
 
 ```bash
 docker compose --profile setup run --rm setup \
@@ -108,123 +116,89 @@ Expected tail:
 [install.sh] All prerequisite checks passed.
 ```
 
-## 4. Repository layout
+## 4. Configure
 
-```
-Dockerfile              Fedora 44 + AMD ROCm 10.0 gfx1151 SDK + build dependencies
-compose.yaml            two services: setup (profile "setup") and server
-.env / .env.example     host paths, port, credentials, launcher knobs, weight overrides
-pull-models.sh          convenience wrapper around the setup service (POSIX sh)
-serve.sh                entrypoint of the `server` service; tuned launch + weight overrides
-state/                  build output + generated launchers (created on first run)
-models/                 weights (created on first run)
-```
-
-The image holds the upstream installer (`install.sh`) and its `flash-next` front end under
-`/opt/strix-halo/`, downloaded from `pwilkin/strix-halo` during `docker build` (so building
-needs network); they are not checked into this repository.
-
-## 5. Configure
-
-```bash
-cp .env.example .env
-$EDITOR .env
-```
+`docker compose` reads `.env` automatically. Defaults in `.env.example` work as-is for rootless
+Docker; both mounted directories must be writable by the container user.
 
 | Variable | Default | Meaning |
 | :-- | :-- | :-- |
-| `STRIX_STATE_DIR` | `./state` | Host directory mounted as the container's `$HOME`. Holds git checkouts, build trees, the Python venv, the Hugging Face cache and the generated launchers. Delete it to start over. |
-| `STRIX_MODEL_DIR` | `./models` | Host directory mounted at `/models`; the weights go here. |
+| `STRIX_STATE_DIR` | `./state` | Mounted as the container's `$HOME`: checkouts, build trees, venv, HF cache, generated launchers. Delete to start over. |
+| `STRIX_MODEL_DIR` | `./models` | Mounted at `/models`; where the weights live. |
 | `STRIX_PORT` | `8080` | Host port for the API. |
 | `JOBS` | `16` | Build parallelism for `setup`. |
-| `HF_TOKEN` | empty | Only if the weight repository is gated or you already have one and want to use it. |
-| `STRIX_USER` | `root` | Container user — see [rootless vs rootful](#11-rootless-vs-rootful-docker). |
+| `HF_TOKEN` | empty | Only if the weight repository is gated. |
+| `STRIX_USER` | `root` | Container user — see [rootless vs rootful](#10-rootless-vs-rootful-docker). |
 | `STRIX_RENDER_GID`, `STRIX_VIDEO_GID` | `303`, `26` | Host GIDs owning `/dev/kfd` and `/dev/dri/renderD128`: `getent group render video \| cut -d: -f3`. |
 | `STRIX_SHM_SIZE` | `8g` | `/dev/shm` size. |
-| `CTX_SIZE`, `BATCH_SIZE`, `UBATCH_SIZE`, `PARALLEL`, `MTP_N_MAX`, `ENABLE_RETAINED_PM4`, `GPU_MAX_HW_QUEUES` | see [tuning](#9-tuning) | Passed to the `server` container and read by the launcher. |
-| `MODEL_FILE`, `DRAFT_MODEL`, `MMPROJ_FILE` | pinned set | Weights to serve — see [serving different weights](#serving-different-weights). |
+| `MODEL_FILE`, `DRAFT_MODEL`, `MMPROJ_FILE` | pinned set | Weights to serve — see [section 8](#8-other-weights-and-arbitrary-models). |
+| `CTX_SIZE`, `BATCH_SIZE`, `UBATCH_SIZE`, `PARALLEL`, `MTP_N_MAX`, `ENABLE_RETAINED_PM4`, `GPU_MAX_HW_QUEUES` | see [tuning](#9-tuning) | Launcher knobs. |
 
-Both bind-mounted directories must be writable by the container user. With the default
-`STRIX_USER=root` under rootless Docker that is your own account, so the defaults in
-`.env.example` need no chown'ing.
+## 5. Build the image
 
-## 6. Build the image
-
-```bash
-docker compose build setup
-# equivalent: docker build -t qwen-next-toolbox:latest .
-```
-
-The image is ~9 GB: it installs `amdrocm10.0-gfx1151` (runtime libraries, including the
-gfx1151 rocBLAS kernels) and `amdrocm-core-devel10.0-gfx1151` (compiler + `-dev` packages)
-from AMD's repository, plus the build tools the installer expects. It also preinstalls that
-dependency list, which is why the container can build without ever calling a package manager.
-
-## 7. Build the stack and prepare the weights
-
-One command does both — it is the upstream installer from `/opt/strix-halo/`:
+Why a container at all: the installer needs a complete, *current* ROCm SDK under one `$ROCM_ROOT`
+(`hipcc`, AMD LLVM, cmake packages `hip`/`hipblas`/`rocblas`/`amd_comgr`/`rocprofiler-register`), and
+the fork is rebased on ROCm 10 (`libamdhip64.so.7`). Most distributions ship an older ROCm or none at
+all, and AMD publishes ROCm 10 only for Fedora/RHEL and Ubuntu — hence a Fedora 44 image fed from
+`stable.repo.amd.com`. The host contributes just the `amdgpu` driver and firmware.
 
 ```bash
-docker compose --profile setup run --rm setup
-# or: ./pull-models.sh
+docker compose build setup            # or: docker build -t qwen-next-toolbox:latest .
 ```
 
-It will, in order:
+~9 GB. Installs `amdrocm10.0-gfx1151` (runtime libraries, incl. gfx1151 rocBLAS kernels) and
+`amdrocm-core-devel10.0-gfx1151` (compiler + `-dev` packages) from AMD's repository, plus the build
+tools the installer expects — which is why the container can build without ever calling a package
+manager. The image also holds the upstream installer (`install.sh`) and its `flash-next` front end
+under `/opt/strix-halo/`, downloaded from `pwilkin/strix-halo` at build time (not checked into this
+repo); pin a commit with `--build-arg STRIX_HALO_REF=<sha>`.
 
-1. re-check the host (driver, KFD, SDK) — same checks as `--check-only`;
-2. create a Python venv with `CppHeaderParser` and `huggingface_hub[hf_xet]`;
-3. clone both repositories and pin them to the recorded commits, refusing to continue if a
+## 6. Build the stack and download weights
+
+`./pull-models.sh` is the upstream installer from `/opt/strix-halo/`. In order it:
+
+1. re-checks the host (driver, KFD, SDK);
+2. creates a Python venv with `CppHeaderParser` and `huggingface_hub[hf_xet]`;
+3. clones both repositories and pins them to the recorded commits, refusing to continue if a
    checkout has local changes;
-4. build ROCr, then HIP against that ROCr, then `llama.cpp` for `gfx1151`, and verify that
-   `libggml-hip.so` resolves `libamdhip64` and `libhsa-runtime64` through the freshly built
-   prefixes rather than the SDK;
-5. download the 9 shards and the MTP draft into `STRIX_MODEL_DIR`, SHA-256 verifying each one;
-6. write `qwen3.8-strix-halo-server` and `llama-server-strix-halo` into
-   `state/.local/bin/`.
+4. builds ROCr, then HIP against that ROCr, then `llama.cpp` for `gfx1151`, and verifies
+   `libggml-hip.so` resolves `libamdhip64`/`libhsa-runtime64` through the fresh prefixes, not the SDK;
+5. downloads the 9 shards and the MTP draft into `STRIX_MODEL_DIR`, SHA-256 verifying each;
+6. writes `qwen3.8-strix-halo-server` and `llama-server-strix-halo` into `state/.local/bin/`.
 
-Compile time is under 10 minutes at `JOBS=16` on a 16-core / 32-thread Strix Halo; after that
-the download is limited by your connection (~96 GiB).
-
-**It is resumable.** Interrupt it whenever you like and run it again: git pins are re-checked,
-CMake builds are incremental, `hf` resumes partial files from
-`<STRIX_MODEL_DIR>/.cache/huggingface` (that directory disappears as each file completes;
-delete it to restart one shard from scratch), and any file already present is hash-checked
-instead of re-downloaded. The launchers are only written at step 6, so the server cannot start
-until one run finishes cleanly.
+**Resumable:** git pins are re-checked, CMake builds are incremental, `hf` resumes partial files
+from `<STRIX_MODEL_DIR>/.cache/huggingface` (delete it to restart a shard from scratch), and any
+file already present is hash-checked instead of re-downloaded. Launchers are written only at step 6,
+so the server cannot start until one run finishes cleanly. Extra flags go to the installer:
+`./pull-models.sh --jobs 8`.
 
 ### Bringing your own weights
 
-Place these exact filenames in `STRIX_MODEL_DIR` and the next `setup` run will verify and keep
-them (the authoritative names and SHA-256 sums are in `/opt/strix-halo/install.sh`):
+Put these exact filenames in `STRIX_MODEL_DIR` and the next `setup` run verifies and keeps them
+(names and SHA-256 sums live in `/opt/strix-halo/install.sh`):
 
 ```
 Qwen3.8-Flash-Next-IQ4_NL-PROJFIX-00001-of-00009.gguf   … through 00009
 mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
 ```
 
-A mismatch is a hard error, not a silent re-download — fix or delete the offending file and
-rerun.
+A mismatch is a hard error, not a silent re-download — fix or delete the offending file and rerun.
+This section is only about the *pinned* files; other weights need no `setup` run
+([section 8](#8-other-weights-and-arbitrary-models)). `setup` always fetches the pinned set; if you
+never serve it, you can delete those files afterwards (rerunning `setup` downloads them again).
 
-This section is only about the *pinned* files. To serve other weights, keep them next to the
-pinned ones and point `MODEL_FILE` at them — see
-[serving different weights](#serving-different-weights). `setup` fetches and verifies the
-pinned set whatever you serve; if you never serve it, you can delete those files after a
-successful run (rerunning `setup` would download them again).
+### The 27B variant
 
-### Switching to the 27B variant
-
-`/opt/strix-halo/install.sh` defaults to the smaller, more mature `qwen38-27b` profile
-(~30 GiB of IQ4_XS weights plus a DFlash2 draft and a vision projector):
+`/opt/strix-halo/install.sh` defaults to the smaller, more mature `qwen38-27b` profile (~30 GiB of
+IQ4_XS weights plus a DFlash2 draft and a vision projector):
 
 ```bash
 docker compose --profile setup run --rm setup bash /opt/strix-halo/install.sh --skip-packages --model-dir /models
 ```
 
-Both profiles install launchers under the same names. Keep separate state directories if you
-want both.
-
-`serve.sh` always applies the flash-next flag set (MTP speculation, 16384 batch), so for the
-27B profile run the upstream launcher instead:
+Both profiles install launchers under the same names — keep separate state directories for both.
+`serve.sh` always applies the flash-next flag set (MTP speculation, 16384 batch), so for 27B run the
+upstream launcher instead:
 
 ```bash
 docker compose run --rm --service-ports \
@@ -232,56 +206,31 @@ docker compose run --rm --service-ports \
   server --host 0.0.0.0 --port 8080
 ```
 
-## 8. Run llama-server
-
-### With Compose
+## 7. Run llama-server
 
 ```bash
 docker compose up -d server
-docker compose logs -f server          # loading 93 GiB takes a while; Ctrl-C once it settles
-curl -s localhost:8080/health          # {"status":"ok"} once the model is loaded
+docker compose logs -f server          # Ctrl-C once it settles
 curl -s localhost:8080/props | head
 docker compose stop server             # or: down
 ```
 
-The launcher already applies the tuned configuration: `-dev ROCm0 -ngl 999 -fa on -fit off`,
-`--load-mode none --lazy-mode on-direct` (this is what keeps the 27.5 GB per-layer embedding
-table out of the resident set), `f16` KV cache, 262144-token context (this toolbox's default;
-upstream's launcher itself ships 65536), 16384 batch and ubatch,
-`--jinja`, and MTP speculation with a draft width of 3 on the same device. Those flags live in
-`serve.sh`, which is mounted from this repository at `/opt/toolbox/serve.sh`; it reads the
-paths to the built engine and to the pinned weights from `state/.local/share/qwen3.8-strix-halo/config.sh`
-and never re-derives them.
+`serve.sh` (mounted from this repo at `/opt/toolbox/serve.sh`) applies the tuned configuration:
+`-dev ROCm0 -ngl 999 -fa on -fit off`, `--load-mode none --lazy-mode on-direct` (keeps the 27.5 GB
+per-layer embedding table out of the resident set), `f16` KV, 262144-token context (this toolbox's
+default; upstream's launcher ships 65536), 16384 batch and ubatch, `--jinja`, and MTP speculation
+with draft width 3 on the same device. It reads the engine and pinned-weight paths from
+`state/.local/share/qwen3.8-strix-halo/config.sh` and never re-derives them.
 
-### Serving different weights
-
-Any GGUF works, in place of the pinned IQ4_NL shards — another quant of the same model, your
-own merge, a quantized fine-tune. Put it in `STRIX_MODEL_DIR` and name it in `.env` (or per
-invocation):
+Extra `llama-server` arguments appended to the service come last, so they win:
 
 ```bash
-# a single file, or the first shard of a split set
-MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server
-
-# with its own draft for MTP speculation
-MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
-
-# no draft that matches the quant -> run without speculation
-MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server
+docker compose run --rm --service-ports server --api-key "$(openssl rand -hex 16)" --parallel 2
 ```
 
-| Variable | Meaning |
-| :-- | :-- |
-| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. |
-| `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (needed when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
-| `MMPROJ_FILE` | optional vision projector, off by default — the pinned flash-next weights are text only. |
-
-`serve.sh` checks that every file it was told to use exists and exits with the offending
-variable name if not. Arguments appended to the service still come last, so
-`docker compose run --rm --service-ports server -- -m /models/other.gguf` overrides
-`MODEL_FILE` for one run.
-
-### With plain `docker run`
+Plain `docker run`, if you would rather not use Compose — every item matters: devices for KFD/DRM,
+`seccomp=unconfined` for the HSA ioctls, `memlock` for pinning weights, and the three mounts,
+because the built runtimes live in `state/` on the host and `serve.sh` is read from the repo:
 
 ```bash
 docker run --rm -it \
@@ -298,30 +247,45 @@ docker run --rm -it \
   qwen-next-toolbox:latest --host 0.0.0.0 --port 8080
 ```
 
-Everything in that list matters: the devices for KFD and DRM access, `seccomp=unconfined` for
-the HSA ioctls, `memlock` for pinning weights, and the mounts because the built runtimes live
-in `state/` on the host and `serve.sh` is read from the repository.
+Watch the GPU with `rocm-smi` / `rocminfo`, which ship in the image
+(`docker compose exec server rocm-smi -u`). On an APU, rocm-smi's "VRAM" counters only cover the
+small carve-out — watch unified memory with `free` on the host.
 
-### Talking to it
+## 8. Other weights and arbitrary models
+
+Any GGUF works in place of the pinned shards — another quant of the same model, your own merge, a
+quantized fine-tune. Put it in `STRIX_MODEL_DIR` and name it in `.env` (or per invocation):
 
 ```bash
-curl -s localhost:8080/v1/models
-curl -s localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Introduce Strix Halo in one line."}],
-       "max_tokens":64}'
+MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server      # split set: name shard 1
+MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
+MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server         # no draft -> no speculation
 ```
 
-The first request after start is slow: weights are read on demand rather than mapped, so pages
-are still cold. `rocm-smi` and `rocminfo` ship in the image:
-`docker compose exec server rocm-smi -u` shows how busy the GPU is. On an APU, rocm-smi's
-"VRAM" counters only cover the small carve-out — watch unified memory with `free` on the host.
+| Variable | Meaning |
+| :-- | :-- |
+| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. |
+| `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (use when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
+| `MMPROJ_FILE` | optional vision projector, off by default — the pinned flash-next weights are text only. |
 
-To pass extra `llama-server` arguments, append them to the service — they are added last and
-therefore win:
+`serve.sh` checks that every file it was told to use exists and exits naming the offending variable.
+Arguments appended to the service still come last, so
+`docker compose run --rm --service-ports server -- -m /models/other.gguf` overrides `MODEL_FILE` for
+one run.
+
+The second installed launcher runs any GGUF under the custom runtime with no opinionated flags:
 
 ```bash
-docker compose run --rm --service-ports server --api-key "$(openssl rand -hex 16)" --parallel 2
+docker compose run --rm --service-ports \
+  --entrypoint /home/strix/.local/bin/llama-server-strix-halo \
+  server -m /models/some-model.gguf -ngl 999 -fa on --host 0.0.0.0 --port 8080
+```
+
+`llama-bench` and `test-backend-sched-ring` live in the same build tree:
+
+```bash
+docker compose run --rm --entrypoint bash server -c \
+  '$HOME/.local/share/qwen3.8-strix-halo/build/llama.cpp/bin/llama-bench -m /models/some-model.gguf'
 ```
 
 ## 9. Tuning
@@ -330,68 +294,59 @@ Set in `.env`, or per invocation (`CTX_SIZE=32768 docker compose up -d server`).
 
 | Variable | Default | Notes |
 | :-- | :-- | :-- |
-| `CTX_SIZE` | `262144` | Set here; upstream's launcher defaults to `65536`. It is the memory-limiting knob on 128 GB — `-fit off` means nothing is auto-shrunk, so an impossible request fails instead of backing off. Drop to `65536`/`131072` if the model loads but a long prompt does not. |
-| `BATCH_SIZE` / `UBATCH_SIZE` | `16384` | The tuned prefill path. A larger ubatch measures the same within error and costs ~8 GiB of compute buffers. |
-| `MTP_N_MAX` | `3` | MTP draft width. `0` disables speculation — and `serve.sh` then skips loading the draft file entirely. |
+| `CTX_SIZE` | `262144` | Set here; upstream's launcher defaults to `65536`. The memory-limiting knob on 128 GB — with `-fit off` nothing is auto-shrunk, so an impossible request fails instead of backing off. Drop to `65536`/`131072` if the model loads but a long prompt does not. |
+| `BATCH_SIZE` / `UBATCH_SIZE` | `16384` | The tuned prefill path. Larger ubatch measures the same within error and costs ~8 GiB of compute buffers. |
+| `MTP_N_MAX` | `3` | MTP draft width. `0` disables speculation — `serve.sh` then skips loading the draft entirely. |
 | `PARALLEL` | `1` | Slots. Each extra slot costs KV memory and decode throughput on an APU. |
-| `ENABLE_RETAINED_PM4` | `1` | The fork's retained PM4 command lists. `0` sets `GGML_CUDA_DISABLE_GRAPHS=1` — useful as an A/B control or if graphs misbehave. |
+| `ENABLE_RETAINED_PM4` | `1` | The fork's retained PM4 command lists. `0` sets `GGML_CUDA_DISABLE_GRAPHS=1` — A/B control, or if graphs misbehave. |
 | `GPU_MAX_HW_QUEUES` | `1` | Keeps the iGPU from latching to max clock when idle. |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.5.1` | Set by the launcher; only override if you know why. |
 | `GGML_HIP_ENABLE_UNIFIED_MEMORY` | `1` | Set by the launcher. |
 
-## 10. Arbitrary models
-
-For a one-off model with the tuned flags, `MODEL_FILE` is the short path (see
-[serving different weights](#serving-different-weights)). The second installed launcher runs
-any GGUF under the custom runtime with no opinionated flags of its own:
-
-```bash
-docker compose run --rm --service-ports \
-  --entrypoint /home/strix/.local/bin/llama-server-strix-halo \
-  server -m /models/some-model.gguf -ngl 999 -fa on --host 0.0.0.0 --port 8080
-```
-
-`llama-bench` and `test-backend-sched-ring` are in the same build tree:
-
-```bash
-docker compose run --rm --entrypoint bash server -c \
-  '$HOME/.local/share/qwen3.8-strix-halo/build/llama.cpp/bin/llama-bench -m /models/some-model.gguf'
-```
-
-## 11. Rootless vs rootful Docker
+## 10. Rootless vs rootful Docker
 
 | | rootless | rootful (system daemon) |
 | :-- | :-- | :-- |
 | container `root` | your host uid — files in the mounts stay yours | real root; files land root-owned |
-| `STRIX_USER` | leave `root` | set `$(id -u):$(id -g)` |
+| `STRIX_USER` | leave `root` | `$(id -u):$(id -g)` |
 | `STRIX_RENDER_GID` / `STRIX_VIDEO_GID` | usually irrelevant, the daemon already passes devices you may open | required, and the uid must be able to open the devices |
-| `memlock` | capped by the daemon's own limit (`systemd` drop-in for the user service if needed) | set on the daemon unit |
+| `memlock` | capped by the daemon's own limit (systemd drop-in for the user service) | set on the daemon unit |
 
-The compose file never uses `privileged`, never adds capabilities, and never mounts the
-docker socket or the host filesystem.
+The compose file never uses `privileged`, never adds capabilities, never mounts the docker socket or
+the host filesystem.
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Cause and fix |
 | :-- | :-- |
-| `failed to initialize ROCm: no ROCm-capable device is detected` | Devices not passed, `seccomp` blocking HSA ioctls, or the container user cannot open `/dev/kfd`. Use the compose service rather than a hand-written `docker run`, and re-check section 3. |
-| `the amdgpu kernel module is not loaded`, `gfx1151 was not detected in KFD topology` | Host driver/firmware problem. Update kernel and `amdgpu` firmware (`gc_11_5_0_*`); nothing in this image can fix it. |
-| `the current user cannot access /dev/kfd` | Add the host user to `render`/`video`, log out, log back in, and confirm the rootless daemon was restarted afterwards. |
-| `mkdir: cannot create directory '/home/strix/.local': Permission denied` | `STRIX_STATE_DIR` is not writable by `STRIX_USER`. Under rootless Docker use the default `STRIX_USER=root`. |
-| `a complete ROCm SDK was not found` / `missing ROCm CMake package: …` | The image was rebuilt without the AMD repository reachable. `docker run --rm --entrypoint hipconfig qwen-next-toolbox:latest --version` should print `7.15.x`. |
-| `xxd not found!` during the ROCr build | An image built before `xxd` was added to the package list (Fedora 44 split it out of `vim-common`). Rebuild. |
-| HIP crashes, `MES failed to respond`, or hangs at model load | Host kernel or amdgpu firmware too old for Strix Halo. Update the host, then retest with `ENABLE_RETAINED_PM4=0` to separate the fork's graph path from the driver. |
-| Allocation failures, or the OOM killer wins | Something else is holding unified memory. Close other GPU users, lower `CTX_SIZE`/`PARALLEL`, or drop `UBATCH_SIZE` to 8192. `docker compose exec server rocm-smi -u` and `free` on the host show what is holding what. |
-| Download stalls or a shard is corrupt | Rerun the setup service. To discard half-finished data: `rm -rf "$STRIX_MODEL_DIR/.cache/huggingface"`. |
-| `server` starts and immediately exits with `No such file or directory` | The launchers do not exist yet — finish a `setup` run first. |
-| Port 8080 already in use | Change `STRIX_PORT`. |
+| `failed to initialize ROCm: no ROCm-capable device is detected` | Devices not passed, `seccomp` blocking HSA ioctls, or the container user cannot open `/dev/kfd`. Use the compose service rather than a hand-written `docker run`; re-check [section 3](#3-host-requirements). |
+| `the amdgpu kernel module is not loaded`, `gfx1151 was not detected in KFD topology` | Host driver/firmware. Update kernel and `amdgpu` firmware (`gc_11_5_0_*`); nothing in this image can fix it. |
+| `the current user cannot access /dev/kfd` | Add the host user to `render`/`video`, log out and back in, confirm the rootless daemon restarted afterwards. |
+| `mkdir: cannot create directory '/home/strix/.local': Permission denied` | `STRIX_STATE_DIR` is not writable by `STRIX_USER`. Under rootless Docker, use the default `STRIX_USER=root`. |
+| `a complete ROCm SDK was not found` / `missing ROCm CMake package: …` | Image rebuilt without the AMD repository reachable. `docker run --rm --entrypoint hipconfig qwen-next-toolbox:latest --version` should print `7.15.x`. |
+| `xxd not found!` during the ROCr build | Image built before `xxd` was added to the package list (Fedora 44 split it out of `vim-common`). Rebuild. |
+| HIP crashes, `MES failed to respond`, hangs at model load | Host kernel or amdgpu firmware too old for Strix Halo. Update the host, then retest with `ENABLE_RETAINED_PM4=0` to separate the fork's graph path from the driver. |
+| Allocation failures, OOM killer wins | Something else holds unified memory. Close other GPU users, lower `CTX_SIZE`/`PARALLEL`, or drop `UBATCH_SIZE` to 8192. `docker compose exec server rocm-smi -u` and `free` show what holds what. |
+| Download stalls or a shard is corrupt | Rerun `./pull-models.sh`. To discard half-finished data: `rm -rf "$STRIX_MODEL_DIR/.cache/huggingface"`. |
+| `server` starts and immediately exits with `No such file or directory` | Launchers do not exist yet — finish a `setup` run. |
 | `serve.sh: no such model: … (MODEL_FILE)` | Typo, or the file is not under `STRIX_MODEL_DIR` (`/models`). Absolute paths must be mounted separately. |
-| `serve.sh: … config.sh not found` | The stack is built only up to the download step; finish a `setup` run. |
-| Weird symbol errors after a `docker compose build` that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo` and rebuild from scratch. |
+| `serve.sh: … config.sh not found` | Stack is built only up to the download step; finish a `setup` run. |
+| Port 8080 already in use | Change `STRIX_PORT`. |
+| Weird symbol errors after a build that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo` and rebuild from scratch. |
 
-## 13. Reference
+## 12. Reference
 
-**Inside the container**
+```
+Dockerfile              Fedora 44 + AMD ROCm 10.0 gfx1151 SDK + build dependencies
+compose.yaml            setup (profile "setup") and server services
+.env / .env.example     host paths, port, credentials, launcher knobs, weight overrides
+pull-models.sh          wrapper around the setup service (POSIX sh)
+serve.sh                entrypoint of the `server` service; tuned launch + weight overrides
+state/                  build output + generated launchers (created on first run)
+models/                 weights (created on first run)
+```
+
+Inside the container:
 
 ```
 /opt/toolbox/serve.sh                                   `server` entrypoint (mounted from the repo)
@@ -399,37 +354,29 @@ docker socket or the host filesystem.
 /home/strix/.local/bin/llama-server-strix-halo          generic wrapper, sets LD_LIBRARY_PATH
 /home/strix/.local/share/qwen3.8-strix-halo/
   src/{rocm-systems,llama.cpp}                          pinned checkouts
-  build/{rocr,hip,llama.cpp}                            build trees; llama-server lives in build/llama.cpp/bin
+  build/{rocr,hip,llama.cpp}                            build trees; llama-server in build/llama.cpp/bin
   runtime/{rocr,hip}                                    the custom libhsa-runtime64 / libamdhip64
   venv/                                                 build + downloader Python environment
   cache/huggingface                                     HF/xet cache
 /opt/rocm → /opt/rocm/core-10.0                         AMD SDK; never modified at runtime
 ```
 
-A shell in the built environment:
+A shell in the built environment: `docker compose run --rm --entrypoint bash server`.
 
-```bash
-docker compose run --rm --entrypoint bash server
-```
+**Runtime environment the launchers set** — `LD_LIBRARY_PATH` with the custom `hip`/`rocr` prefixes
+first, then the SDK (`/opt/rocm/core/lib`, `…/lib/rocm_sysdeps/lib`); `HSA_OVERRIDE_GFX_VERSION=11.5.1`;
+`GGML_HIP_ENABLE_UNIFIED_MEMORY=1`; `ENABLE_RETAINED_PM4=1` with `DEBUG_HIP_GRAPH_PM4=1`, or
+`GGML_CUDA_DISABLE_GRAPHS=1` when disabled.
 
-**Runtime environment the launchers set** — `LD_LIBRARY_PATH` with the custom `hip`/`rocr`
-prefixes first, then the SDK (`/opt/rocm/core/lib`, `…/lib/rocm_sysdeps/lib`);
-`HSA_OVERRIDE_GFX_VERSION=11.5.1`; `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`; `ENABLE_RETAINED_PM4=1`
-with `DEBUG_HIP_GRAPH_PM4=1`, or `GGML_CUDA_DISABLE_GRAPHS=1` when it is disabled.
-
-**Pins** — the ROCm and llama.cpp commits are recorded in the installer (`/opt/strix-halo/install.sh`); the image
-tag of the AMD SDK is `amdrocm-core-devel10.0-gfx1151`. The installer refuses to move off its
-pinned commits, so a rebuild stays reproducible until the installer itself changes. The image
-fetches the installer from `main` by default; pin a commit with
-`docker build --build-arg STRIX_HALO_REF=<sha> .` (or `docker compose build
---build-arg STRIX_HALO_REF=<sha> setup`) to freeze it.
+**Pins** — ROCm and llama.cpp commits are recorded in the installer (`/opt/strix-halo/install.sh`),
+which refuses to move off them, so rebuilds stay reproducible. The AMD SDK package is
+`amdrocm-core-devel10.0-gfx1151`.
 
 **Upstream** — [installer and guide](https://github.com/pwilkin/strix-halo) ·
-[amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes) (container
-layout this image derives from) ·
-[write-up with the benchmarks](https://pwilkin.github.io/strix-halo/) ·
+[amd-strix-halo-toolboxes](https://github.com/kyuz0/amd-strix-halo-toolboxes) (container layout) ·
+[write-up with benchmarks](https://pwilkin.github.io/strix-halo/) ·
 [llama.cpp fork](https://github.com/pwilkin/llama.cpp/tree/strix-halo) ·
 [rocm-systems fork](https://github.com/pwilkin/rocm-systems/tree/ilintar-experiments) ·
-[weights](https://huggingface.co/ilintar/qwen3.8-flash-next-gguf-strix-halo).
-llama.cpp, ROCm, Qwen and the quantized weights remain under their respective licenses; the
-wrapper files in this repository are MIT, as is the upstream installer.
+[weights](https://huggingface.co/ilintar/qwen3.8-flash-next-gguf-strix-halo). llama.cpp, ROCm, Qwen
+and the quantized weights remain under their respective licenses; the wrapper files in this
+repository are MIT, as is the upstream installer.
