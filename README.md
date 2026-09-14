@@ -113,8 +113,9 @@ Expected tail:
 ```
 Dockerfile              Fedora 44 + AMD ROCm 10.0 gfx1151 SDK + build dependencies
 compose.yaml            two services: setup (profile "setup") and server
-.env / .env.example     host paths, port, credentials, launcher knobs
+.env / .env.example     host paths, port, credentials, launcher knobs, weight overrides
 pull-models.sh          convenience wrapper around the setup service (POSIX sh)
+serve.sh                entrypoint of the `server` service; tuned launch + weight overrides
 state/                  build output + generated launchers (created on first run)
 models/                 weights (created on first run)
 ```
@@ -141,6 +142,7 @@ $EDITOR .env
 | `STRIX_RENDER_GID`, `STRIX_VIDEO_GID` | `303`, `26` | Host GIDs owning `/dev/kfd` and `/dev/dri/renderD128`: `getent group render video \| cut -d: -f3`. |
 | `STRIX_SHM_SIZE` | `8g` | `/dev/shm` size. |
 | `CTX_SIZE`, `BATCH_SIZE`, `UBATCH_SIZE`, `PARALLEL`, `MTP_N_MAX`, `ENABLE_RETAINED_PM4`, `GPU_MAX_HW_QUEUES` | see [tuning](#9-tuning) | Passed to the `server` container and read by the launcher. |
+| `MODEL_FILE`, `DRAFT_MODEL`, `MMPROJ_FILE` | pinned set | Weights to serve — see [serving different weights](#serving-different-weights). |
 
 Both bind-mounted directories must be writable by the container user. With the default
 `STRIX_USER=root` under rootless Docker that is your own account, so the defaults in
@@ -203,6 +205,12 @@ mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
 A mismatch is a hard error, not a silent re-download — fix or delete the offending file and
 rerun.
 
+This section is only about the *pinned* files. To serve other weights, keep them next to the
+pinned ones and point `MODEL_FILE` at them — see
+[serving different weights](#serving-different-weights). `setup` fetches and verifies the
+pinned set whatever you serve; if you never serve it, you can delete those files after a
+successful run (rerunning `setup` would download them again).
+
 ### Switching to the 27B variant
 
 `/opt/strix-halo/install.sh` defaults to the smaller, more mature `qwen38-27b` profile
@@ -212,8 +220,17 @@ rerun.
 docker compose --profile setup run --rm setup bash /opt/strix-halo/install.sh --skip-packages --model-dir /models
 ```
 
-Both profiles install launchers under the same names, so the `server` service always runs
-whichever profile was installed last. Keep separate state directories if you want both.
+Both profiles install launchers under the same names. Keep separate state directories if you
+want both.
+
+`serve.sh` always applies the flash-next flag set (MTP speculation, 16384 batch), so for the
+27B profile run the upstream launcher instead:
+
+```bash
+docker compose run --rm --service-ports \
+  --entrypoint /home/strix/.local/bin/qwen3.8-strix-halo-server \
+  server --host 0.0.0.0 --port 8080
+```
 
 ## 8. Run llama-server
 
@@ -231,7 +248,38 @@ The launcher already applies the tuned configuration: `-dev ROCm0 -ngl 999 -fa o
 `--load-mode none --lazy-mode on-direct` (this is what keeps the 27.5 GB per-layer embedding
 table out of the resident set), `f16` KV cache, 262144-token context (this toolbox's default;
 upstream's launcher itself ships 65536), 16384 batch and ubatch,
-`--jinja`, and MTP speculation with a draft width of 3 on the same device.
+`--jinja`, and MTP speculation with a draft width of 3 on the same device. Those flags live in
+`serve.sh`, which is mounted from this repository at `/opt/toolbox/serve.sh`; it reads the
+paths to the built engine and to the pinned weights from `state/.local/share/qwen3.8-strix-halo/config.sh`
+and never re-derives them.
+
+### Serving different weights
+
+Any GGUF works, in place of the pinned IQ4_NL shards — another quant of the same model, your
+own merge, a quantized fine-tune. Put it in `STRIX_MODEL_DIR` and name it in `.env` (or per
+invocation):
+
+```bash
+# a single file, or the first shard of a split set
+MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server
+
+# with its own draft for MTP speculation
+MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
+
+# no draft that matches the quant -> run without speculation
+MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server
+```
+
+| Variable | Meaning |
+| :-- | :-- |
+| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. |
+| `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (needed when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
+| `MMPROJ_FILE` | optional vision projector, off by default — the pinned flash-next weights are text only. |
+
+`serve.sh` checks that every file it was told to use exists and exits with the offending
+variable name if not. Arguments appended to the service still come last, so
+`docker compose run --rm --service-ports server -- -m /models/other.gguf` overrides
+`MODEL_FILE` for one run.
 
 ### With plain `docker run`
 
@@ -244,14 +292,15 @@ docker run --rm -it \
   -e HF_TOKEN -e CTX_SIZE=262144 -e MTP_N_MAX=3 \
   -v "$PWD/state:/home/strix" \
   -v /path/to/models:/models \
+  -v "$PWD/serve.sh:/opt/toolbox/serve.sh:ro" \
   -p 8080:8080 \
-  --entrypoint /home/strix/.local/bin/qwen3.8-strix-halo-server \
+  --entrypoint /opt/toolbox/serve.sh \
   qwen-next-toolbox:latest --host 0.0.0.0 --port 8080
 ```
 
 Everything in that list matters: the devices for KFD and DRM access, `seccomp=unconfined` for
-the HSA ioctls, `memlock` for pinning weights, and the two mounts because the launchers and
-the built runtimes live in `state/` on the host.
+the HSA ioctls, `memlock` for pinning weights, and the mounts because the built runtimes live
+in `state/` on the host and `serve.sh` is read from the repository.
 
 ### Talking to it
 
@@ -283,7 +332,7 @@ Set in `.env`, or per invocation (`CTX_SIZE=32768 docker compose up -d server`).
 | :-- | :-- | :-- |
 | `CTX_SIZE` | `262144` | Set here; upstream's launcher defaults to `65536`. It is the memory-limiting knob on 128 GB — `-fit off` means nothing is auto-shrunk, so an impossible request fails instead of backing off. Drop to `65536`/`131072` if the model loads but a long prompt does not. |
 | `BATCH_SIZE` / `UBATCH_SIZE` | `16384` | The tuned prefill path. A larger ubatch measures the same within error and costs ~8 GiB of compute buffers. |
-| `MTP_N_MAX` | `3` | MTP draft width. `0` disables speculation. |
+| `MTP_N_MAX` | `3` | MTP draft width. `0` disables speculation — and `serve.sh` then skips loading the draft file entirely. |
 | `PARALLEL` | `1` | Slots. Each extra slot costs KV memory and decode throughput on an APU. |
 | `ENABLE_RETAINED_PM4` | `1` | The fork's retained PM4 command lists. `0` sets `GGML_CUDA_DISABLE_GRAPHS=1` — useful as an A/B control or if graphs misbehave. |
 | `GPU_MAX_HW_QUEUES` | `1` | Keeps the iGPU from latching to max clock when idle. |
@@ -292,8 +341,9 @@ Set in `.env`, or per invocation (`CTX_SIZE=32768 docker compose up -d server`).
 
 ## 10. Arbitrary models
 
-The second installed launcher runs any GGUF under the custom runtime, with no opinionated
-flags of its own:
+For a one-off model with the tuned flags, `MODEL_FILE` is the short path (see
+[serving different weights](#serving-different-weights)). The second installed launcher runs
+any GGUF under the custom runtime with no opinionated flags of its own:
 
 ```bash
 docker compose run --rm --service-ports \
@@ -335,6 +385,8 @@ docker socket or the host filesystem.
 | Download stalls or a shard is corrupt | Rerun the setup service. To discard half-finished data: `rm -rf "$STRIX_MODEL_DIR/.cache/huggingface"`. |
 | `server` starts and immediately exits with `No such file or directory` | The launchers do not exist yet — finish a `setup` run first. |
 | Port 8080 already in use | Change `STRIX_PORT`. |
+| `serve.sh: no such model: … (MODEL_FILE)` | Typo, or the file is not under `STRIX_MODEL_DIR` (`/models`). Absolute paths must be mounted separately. |
+| `serve.sh: … config.sh not found` | The stack is built only up to the download step; finish a `setup` run. |
 | Weird symbol errors after a `docker compose build` that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo` and rebuild from scratch. |
 
 ## 13. Reference
@@ -342,7 +394,8 @@ docker socket or the host filesystem.
 **Inside the container**
 
 ```
-/home/strix/.local/bin/qwen3.8-strix-halo-server        tuned launcher for flash-next
+/opt/toolbox/serve.sh                                   `server` entrypoint (mounted from the repo)
+/home/strix/.local/bin/qwen3.8-strix-halo-server        upstream tuned launcher for flash-next
 /home/strix/.local/bin/llama-server-strix-halo          generic wrapper, sets LD_LIBRARY_PATH
 /home/strix/.local/share/qwen3.8-strix-halo/
   src/{rocm-systems,llama.cpp}                          pinned checkouts

@@ -25,6 +25,7 @@ x-toolbox: &toolbox
   volumes:
     - ${STRIX_STATE_DIR:-./state}:/home/strix
     - ${STRIX_MODEL_DIR:-./models}:/models
+    - ./serve.sh:/opt/toolbox/serve.sh:ro
   environment:
     HF_TOKEN: ${HF_TOKEN:-}
 
@@ -53,5 +54,8 @@ services:
       MTP_N_MAX: ${MTP_N_MAX:-3}
       ENABLE_RETAINED_PM4: ${ENABLE_RETAINED_PM4:-1}
       GPU_MAX_HW_QUEUES: ${GPU_MAX_HW_QUEUES:-1}
-    entrypoint: ["/home/strix/.local/bin/qwen3.8-strix-halo-server"]
+      MODEL_FILE: ${MODEL_FILE:-}
+      DRAFT_MODEL: ${DRAFT_MODEL:-}
+      MMPROJ_FILE: ${MMPROJ_FILE:-}
+    entrypoint: ["/opt/toolbox/serve.sh"]
     command: ["--host", "0.0.0.0", "--port", "8080"]
