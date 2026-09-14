@@ -1,0 +1,57 @@
+name: qwen-next-toolbox
+
+x-toolbox: &toolbox
+  image: qwen-next-toolbox:latest
+  build: .
+  # Rootless-friendly: no privileged mode, no added capabilities. The GIDs below are only
+  # needed when the container runs unprivileged and your udev rules are stricter than 0666.
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  group_add:
+    - "${STRIX_RENDER_GID:-303}"
+    - "${STRIX_VIDEO_GID:-26}"
+  security_opt:
+    - seccomp=unconfined
+  shm_size: "${STRIX_SHM_SIZE:-8g}"
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+  # Rootless Docker: container uid 0 *is* your host uid, so the default keeps every
+  # file it writes on the host owned by you. For a rootful system daemon set
+  # STRIX_USER=$(id -u):$(id -g) instead.
+  user: "${STRIX_USER:-root}"
+  volumes:
+    - ${STRIX_STATE_DIR:-./state}:/home/strix
+    - ${STRIX_MODEL_DIR:-./models}:/models
+  environment:
+    HF_TOKEN: ${HF_TOKEN:-}
+
+services:
+  # One-off build + model download. Re-running it is cheap: everything it
+  # produces lives in STRIX_STATE_DIR / STRIX_MODEL_DIR and is verified, not redone.
+  setup:
+    <<: *toolbox
+    profiles: ["setup"]
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      JOBS: ${JOBS:-16}
+    command: ["bash", "/opt/strix-halo/install-flash-next.sh", "--skip-packages", "--model-dir", "/models"]
+
+  # The tuned server: 64k context, 16384 batch/ubatch, MTP draft width 3.
+  server:
+    <<: *toolbox
+    ports:
+      - "${STRIX_PORT:-8080}:8080"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      CTX_SIZE: ${CTX_SIZE:-262144}
+      BATCH_SIZE: ${BATCH_SIZE:-16384}
+      UBATCH_SIZE: ${UBATCH_SIZE:-16384}
+      PARALLEL: ${PARALLEL:-1}
+      MTP_N_MAX: ${MTP_N_MAX:-3}
+      ENABLE_RETAINED_PM4: ${ENABLE_RETAINED_PM4:-1}
+      GPU_MAX_HW_QUEUES: ${GPU_MAX_HW_QUEUES:-1}
+    entrypoint: ["/home/strix/.local/bin/qwen3.8-strix-halo-server"]
+    command: ["--host", "0.0.0.0", "--port", "8080"]
