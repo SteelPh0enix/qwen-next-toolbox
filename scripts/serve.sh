@@ -31,9 +31,11 @@ source "$config"
 
 model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
 
-# Draft: a file = sidecar MTP draft; builtin = the nextn head inside the main GGUF, so the spec
-# block stays but carries no --spec-draft-model; none/empty = no MTP draft, ngram-mod unaffected.
-draft=${DRAFT_MODEL-${STRIX_DFLASH_MODEL:-}}
+# Draft: empty = the pinned sidecar draft; a file = that sidecar draft; builtin = the nextn head
+# inside the main GGUF, so the spec block stays but carries no --spec-draft-model; none = no MTP
+# draft, ngram-mod unaffected. Compose passes DRAFT_MODEL empty when .env leaves it blank, so the
+# fallback has to use :- (an unset-only fallback would never fire).
+draft=${DRAFT_MODEL:-${STRIX_DFLASH_MODEL:-}}
 [[ $draft == none ]] && draft=''
 [[ -n $draft && $draft != builtin ]] && draft=$(resolve "$draft")
 mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-F16.gguf}}
