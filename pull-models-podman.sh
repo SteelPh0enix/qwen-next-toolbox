@@ -7,8 +7,10 @@
 # duplicating the pins here. Build steps are incremental no-ops once the stack is built,
 # and the run ends by writing the launchers into state/.
 #
-#   ./pull-models.sh                  # start or resume (~97 GiB total, incl. the vision projector)
-#   ./pull-models.sh --jobs 8         # extra flags go to the installer
+#   ./pull-models-podman.sh                  # rebuild the image, then start or resume (~97 GiB)
+#   ./pull-models-podman.sh --jobs 8         # extra flags go to the installer
+#   SKIP_BUILD=1 ./pull-models-podman.sh     # keep the current image (no new upstream pins)
+#   NO_CACHE=1   ./pull-models-podman.sh     # full `podman build --no-cache` (slow: ~9 GB of RPMs)
 #
 # Interrupt it whenever you like: `hf` resumes partial files and every finished file is
 # hash-verified before it is accepted. Needs ~110 GiB free on the model disk.
@@ -39,7 +41,23 @@ fi
 
 printf 'weights            -> %s\n' "${model_dir:-$here/models}"
 printf 'builds, launchers  -> %s/state\n' "$here"
-printf 'compose backend    -> %s\n\n' "$compose_bin"
+printf 'compose backend    -> %s\n' "$compose_bin"
+
+# The image carries the installer and the pins it records, so rebuilding is what picks up an
+# upstream update. BUILD_ID changes every run, which invalidates only the layer that downloads the
+# installer; the ROCm SDK layers are reused from the cache, so this costs two small downloads.
+if [ -z "${SKIP_BUILD:-}" ]; then
+  build_id=$(date -u +%Y%m%dT%H%M%SZ)
+  if [ -n "${NO_CACHE:-}" ]; then
+    printf 'image              -> podman build --no-cache (full rebuild, slow)\n\n'
+    podman build --no-cache -t qwen-next-toolbox:latest "$here"
+  else
+    printf 'image              -> podman build BUILD_ID=%s (fresh installer, cached ROCm layers)\n\n' "$build_id"
+    podman build --build-arg "BUILD_ID=$build_id" -t qwen-next-toolbox:latest "$here"
+  fi
+fi
+
+printf '\n'
 
 # podman-compose doesn't understand --project-directory, so run from the project dir
 cd "$here"

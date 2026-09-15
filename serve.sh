@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
 # overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
-# README section 9). Vision is on by default: mmproj-F16.gguf, fetched by ./pull-models.sh
-# (./pull-mmproj.sh on its own); set MMPROJ_FILE=none to drop the projector.
+# README section 9). Projector: empty MMPROJ_FILE = mmproj-F16.gguf, fetched by ./pull-models.sh
+# (./pull-mmproj.sh on its own); MMPROJ_FILE=none drops --mmproj. Projector support crashes
+# llama-server on this stack, so .env ships none.
 #
 # Paths to the built engine and to the pinned weights come from the config.sh that the
 # installer writes; only the model selection is overridden here, never the ROCm wiring.

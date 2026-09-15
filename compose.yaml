@@ -2,7 +2,13 @@ name: qwen-next-toolbox
 
 x-toolbox: &toolbox
   image: qwen-next-toolbox:latest
-  build: .
+  build:
+    context: .
+    args:
+      # Bumped by ./pull-models.sh / ./pull-models-podman.sh so that the layer fetching the
+      # upstream installer (and with it the pins) is always rebuilt; the ROCm layers above it
+      # stay cached. A plain `docker compose build` keeps the cached installer.
+      BUILD_ID: ${BUILD_ID:-0}
   # Rootless-friendly: no privileged mode, no added capabilities. The GIDs below are only
   # needed when the container runs unprivileged and your udev rules are stricter than 0666.
   devices:

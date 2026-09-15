@@ -6,8 +6,9 @@
 # the pins here. Build steps are incremental no-ops once the stack is built, and the run
 # ends by writing the launchers into state/.
 #
-#   ./pull-models.sh                  # start or resume (~97 GiB total, incl. the vision projector)
+#   ./pull-models.sh                  # rebuild the image, then start or resume the build + download
 #   ./pull-models.sh --jobs 8         # extra flags go to the installer
+#   SKIP_BUILD=1 ./pull-models.sh     # keep the current image (no new upstream pins)
 #
 # Interrupt it whenever you like: `hf` resumes partial files and every finished file is
 # hash-verified before it is accepted. Needs ~110 GiB free on the model disk.
@@ -23,10 +24,18 @@ fi
 printf 'weights            -> %s\n' "${model_dir:-$here/models}"
 printf 'builds, launchers  -> %s/state\n\n' "$here"
 
+# The image carries the installer and the pins it records, so rebuilding is what picks up an
+# upstream update. A fresh BUILD_ID invalidates only the layer that downloads the installer.
+if [ -z "${SKIP_BUILD:-}" ]; then
+  printf 'image              -> rebuilding (fresh installer, cached ROCm layers)\n'
+  BUILD_ID=$(date -u +%Y%m%dT%H%M%SZ) docker compose --project-directory "$here" --profile setup \
+    build setup
+fi
+
 docker compose --project-directory "$here" --profile setup run --rm setup \
   bash /opt/strix-halo/install-flash-next.sh --skip-packages --model-dir /models "$@"
 
 # The default vision projector comes from this repo, not from the installer's pins.
 sh "$here/pull-mmproj.sh"
 
-printf '\nlaunchers written to %s/state/.local/bin/\nstart with: docker compose up -d server\n' "$here"
+printf '\nlaunchers written to %s/state/.local/bin/\nrestart on the new binaries with: docker compose up -d --force-recreate server\n' "$here"

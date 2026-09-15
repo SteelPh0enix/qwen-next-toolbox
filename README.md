@@ -67,43 +67,58 @@ Everything below explains those commands and the knobs you can turn.
 
 ## 2. Update guide
 
-An update is the same commands as the first install. The checkouts, build trees and launchers all
-live in `STRIX_STATE_DIR`, the weights in `STRIX_MODEL_DIR`: nothing is uninstalled, nothing is
-re-downloaded.
+An update is the install commands run again. The checkouts, build trees and launchers all live in
+`STRIX_STATE_DIR`, the weights in `STRIX_MODEL_DIR`: nothing is uninstalled, nothing is re-downloaded.
 
-```bash
-docker compose build setup                     # 1. refetch the installer, which carries the pins
-./pull-models.sh                               # 2. check out, recompile, rewrite launchers
-docker compose up -d --force-recreate server   # 3. restart on the new binaries
-```
+| Step | docker | podman |
+| :-- | :-- | :-- |
+| rebuild image, recompile, verify weights | `./pull-models.sh` | `./pull-models-podman.sh` |
+| restart on the new binaries | `docker compose up -d --force-recreate server` | `podman compose up -d --force-recreate server` |
 
-Step 1 is the only one that moves anything: `llama_repo_commit` and `rocm_repo_commit`, the pins the
-installer keeps at `/opt/strix-halo/install.sh`, come from
-[pwilkin/strix-halo](https://github.com/pwilkin/strix-halo) at image-build time.
+The first command is the only one that fetches anything from upstream. The pins —
+`llama_repo_commit`, `rocm_repo_commit` — are recorded in the installer the *image* carries at
+`/opt/strix-halo/install.sh`, downloaded from [pwilkin/strix-halo](https://github.com/pwilkin/strix-halo)
+at build time, so an update requires rebuilding the image. Both helper scripts start with that, and
+pass a `BUILD_ID` that changes on every run: the layer downloading the installer is then never a
+cache hit, so the new pins always land in the image, while the ~9 GB of ROCm layers are reused from
+the cache. A rebuild costs two small downloads — `--no-cache` is not needed.
 
-Step 2 fast-forwards `state/.local/share/qwen3.8-strix-halo/src/llama.cpp` to the commit the new
-installer records, recompiles incrementally (ninja rebuilds what changed — minutes for an
-engine-only bump), runs `test-backend-sched-ring` as a gate, and writes the launchers last: a run
-that fails halfway leaves the previous build in place. ROCr and HIP follow the same rule with their
-own pins; deleting `state/` to start over is never required.
+A plain `docker compose build setup` reuses the cached installer, so use the helper scripts, or
+`BUILD_ID=$(date -u +%s) docker compose build setup`, when you want upstream's current pins.
 
-Weights are not touched: every pinned file is hash-checked and kept, including the projector that
-`pull-models.sh` fetches at the end.
+| Knob | Effect |
+| :-- | :-- |
+| `SKIP_BUILD=1 ./pull-models.sh` | keep the current image: recompile and verify only, no new pins |
+| `NO_CACHE=1 ./pull-models-podman.sh`, `docker compose build --no-cache setup` | rebuild everything incl. the AMD packages: slow, for a broken cache or a changed package set only |
+| `--build-arg STRIX_HALO_REF=<installer-sha>` | pin the installer itself — the rollback path, see below |
 
-Where you stand, and where the next update would take you:
+What the setup run does: it fast-forwards
+`state/.local/share/qwen3.8-strix-halo/src/llama.cpp` to the commit the new installer records,
+recompiles incrementally (ninja rebuilds what changed — minutes for an engine-only bump), runs
+`test-backend-sched-ring` as a gate, and writes the launchers last: a run that fails halfway leaves
+the previous build in place. ROCr and HIP follow the same rule with their own pins; deleting
+`state/` to start over is never required. Weights are not touched — every pinned file is
+hash-checked and kept, including the projector fetched at the end. The checkouts must be clean: the
+installer refuses to move a tree with local changes rather than discard them
+(`git -C state/.local/share/qwen3.8-strix-halo/src/llama.cpp status`).
+
+Where you stand, and where the next update would take you (`podman run` works the same):
 
 ```bash
 git -C state/.local/share/qwen3.8-strix-halo/src/llama.cpp log --oneline -1   # built from
 docker run --rm --entrypoint grep qwen-next-toolbox:latest \
-  -e llama_repo_commit -e rocm_repo_commit /opt/strix-halo/install.sh         # current image
+  -e llama_repo_commit -e rocm_repo_commit /opt/strix-halo/install.sh         # in the image now
 ```
 
-* The checkouts must be clean — the installer refuses to move a tree with local changes rather than
-  discard them (`git -C state/.local/share/qwen3.8-strix-halo/src/llama.cpp status`).
-* `serve.sh` finds the engine through `state/.local/share/qwen3.8-strix-halo/config.sh`, which every
-  `setup` run rewrites, so a rebuilt stack needs no other change here.
-* To go back: `docker compose build --build-arg STRIX_HALO_REF=<installer-sha> setup` and rerun
-  `./pull-models.sh` — pins are checked out by commit, older ones included.
+Rolling back to an older installer — pins are checked out by commit, older ones included:
+
+```bash
+docker compose build --build-arg STRIX_HALO_REF=<installer-sha> setup   # podman: build --build-arg ... -t qwen-next-toolbox:latest .
+SKIP_BUILD=1 ./pull-models.sh                                           # build with those pins, keep the image
+```
+
+`serve.sh` finds the engine through `state/.local/share/qwen3.8-strix-halo/config.sh`, which every
+`setup` run rewrites, so a rebuilt stack needs no other change here.
 
 ## 3. What you get
 
@@ -112,7 +127,7 @@ docker run --rm --entrypoint grep qwen-next-toolbox:latest \
 | ROCr runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
 | HIP runtime | same fork, `projects/clr` + `projects/hip` | `libamdhip64.so.7.16`, built into the state directory |
 | Engine | `pwilkin/llama.cpp@strix-halo` (`d67d5883`) — UMA scheduler ring, wave32 `TOP_K`, gfx1151 tuning, MTP speculative decoding | `llama-server`, `llama-bench`, `test-backend-sched-ring` |
-| Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo`, `unsloth/Qwen3.8-Flash-Next-GGUF` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB) + `mmproj-F16.gguf` vision projector (0.9 GiB) |
+| Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo`, `unsloth/Qwen3.8-Flash-Next-GGUF` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB) + `mmproj-F16.gguf` vision projector (0.9 GiB, served only if `MMPROJ_FILE` asks for it) |
 | ROCm SDK | AMD Core SDK 10.0 (TheRock stream), `amdrocm{,-core-devel}10.0-gfx1151` | `hipcc`, AMD LLVM, rocBLAS/hipBLAS with gfx1151 kernels, `amd_comgr`, `rocprofiler-register` |
 
 Upstream's numbers for this configuration on one Radeon 8060S, 16384 batch/ubatch:
@@ -194,11 +209,14 @@ docker compose build setup            # or: docker build -t qwen-next-toolbox:la
 tools the installer expects — which is why the container can build without ever calling a package
 manager. The image also holds the upstream installer (`install.sh`) and its `flash-next` front end
 under `/opt/strix-halo/`, downloaded from `pwilkin/strix-halo` at build time (not checked into this
-repo); pin a commit with `--build-arg STRIX_HALO_REF=<sha>`.
+repo); pin a commit with `--build-arg STRIX_HALO_REF=<sha>`. That download is invalidated by a
+`BUILD_ID` build arg on every `./pull-models*.sh` run, so it always reflects upstream without a
+full `--no-cache` rebuild — see [the update guide](#2-update-guide).
 
 ## 7. Build the stack and download weights
 
-`./pull-models.sh` is the upstream installer from `/opt/strix-halo/`. In order it:
+`./pull-models.sh` rebuilds the image first, so the installer and the pins it carries are current
+(`SKIP_BUILD=1` to keep the image), then runs that installer from `/opt/strix-halo/`. In order it:
 
 1. re-checks the host (driver, KFD, SDK);
 2. creates a Python venv with `CppHeaderParser` and `huggingface_hub[hf_xet]`;
@@ -208,7 +226,8 @@ repo); pin a commit with `--build-arg STRIX_HALO_REF=<sha>`.
    `libggml-hip.so` resolves `libamdhip64`/`libhsa-runtime64` through the fresh prefixes, not the SDK;
 5. downloads the 9 shards and the MTP draft into `STRIX_MODEL_DIR`, SHA-256 verifying each;
 6. writes `qwen3.8-strix-halo-server` and `llama-server-strix-halo` into `state/.local/bin/`;
-7. fetches `mmproj-F16.gguf` (the vision projector `serve.sh` loads by default) through
+7. fetches `mmproj-F16.gguf` (the vision projector; downloaded either way, served only if
+   `MMPROJ_FILE` names it — [section 9](#9-other-weights-and-arbitrary-models)) through
    `pull-mmproj.sh` — hash-verified and resumable like the rest, `wget` on the host.
 
 **Resumable:** git pins are re-checked, CMake builds are incremental, `hf` resumes partial files
@@ -268,8 +287,9 @@ docker compose stop server             # or: down
 `-dev ROCm0 -ngl 999 -fa on -fit off`, `--load-mode none --lazy-mode on-direct` (keeps the 27.5 GB
 per-layer embedding table out of the resident set), `f16` KV, 262144-token context (this toolbox's
 default; upstream's launcher ships 65536), 16384 batch and ubatch, `--jinja`, `--alias` (see
-[section 10](#10-tuning)), MTP speculation with draft width 3 on the same device, and the vision
-projector (`--mmproj mmproj-F16.gguf --mmproj-device ROCm0`; `MMPROJ_FILE=none` for text only). It
+[section 10](#10-tuning)), MTP speculation with draft width 3 on the same device. The vision
+projector is off by default (`MMPROJ_FILE=none` in `.env`) because it crashes `llama-server`; an
+empty or set `MMPROJ_FILE` adds `--mmproj`/`--mmproj-device ROCm0`. It
 reads the engine and pinned-weight paths from `state/.local/share/qwen3.8-strix-halo/config.sh` and
 never re-derives them.
 
@@ -289,7 +309,7 @@ docker run --rm -it \
   --group-add "$(getent group render | cut -d: -f3)" \
   --security-opt seccomp=unconfined \
   --ulimit memlock=-1:-1 --shm-size 8g \
-  -e HF_TOKEN -e CTX_SIZE=262144 -e MTP_N_MAX=3 \
+  -e HF_TOKEN -e CTX_SIZE=262144 -e MTP_N_MAX=3 -e MMPROJ_FILE=none \
   -v "$PWD/state:/home/strix" \
   -v /path/to/models:/models \
   -v "$PWD/serve.sh:/opt/toolbox/serve.sh:ro" \
@@ -311,7 +331,7 @@ quantized fine-tune. Put it in `STRIX_MODEL_DIR` and name it in `.env` (or per i
 MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server      # split set: name shard 1
 MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
 MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server         # no draft -> no speculation
-MMPROJ_FILE=none docker compose up -d server                                        # text only, no projector
+MMPROJ_FILE=mmproj-F16.gguf docker compose up -d server                              # vision: unstable, see below
 # Weights already on disk elsewhere: mount them with STRIX_MODEL_DIR_EXTRA (at /models-extra) and
 # use the absolute container path:
 STRIX_MODEL_DIR_EXTRA=/data/models/UD-Q4_K_XL \
@@ -322,7 +342,7 @@ STRIX_MODEL_DIR_EXTRA=/data/models/UD-Q4_K_XL \
 | :-- | :-- |
 | `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is (`/models-extra/...` for `STRIX_MODEL_DIR_EXTRA`). Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
 | `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (use when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
-| `MMPROJ_FILE` | vision projector, on by default with `mmproj-F16.gguf` (`./pull-mmproj.sh`). `none` drops `--mmproj`; any other projector file works as a bare name under `/models`, but avoid the `mmproj-BF16.gguf` the same repository publishes — bf16 projectors are unstable. Adds ~1 GiB of resident memory on top of the LLM. |
+| `MMPROJ_FILE` | vision projector. `.env` ships `none`, which drops `--mmproj` (text only) — mmproj crashes `llama-server` on this stack, random kills mid-generation included. Empty means `mmproj-F16.gguf` (`./pull-mmproj.sh` fetches it); any projector works as a bare name under `/models`, but avoid the `mmproj-BF16.gguf` the same repository publishes. Adds ~1 GiB of resident memory on top of the LLM. |
 
 `serve.sh` checks that every file it was told to use exists and exits naming the offending variable.
 Arguments appended to the service still come last, so
@@ -387,9 +407,11 @@ the host filesystem.
 | Download stalls or a shard is corrupt | Rerun `./pull-models.sh`. To discard half-finished data: `rm -rf "$STRIX_MODEL_DIR/.cache/huggingface"`. |
 | `server` starts and immediately exits with `No such file or directory` | Launchers do not exist yet — finish a `setup` run. |
 | `serve.sh: no such model: … (MODEL_FILE)` | Typo, or the file is not under `STRIX_MODEL_DIR` (`/models`). Absolute paths must be mounted separately. |
-| `serve.sh: no such projector: … (MMPROJ_FILE)` | Weights pulled before the projector was pinned: `./pull-mmproj.sh`, or serve text-only with `MMPROJ_FILE=none`. |
+| `serve.sh: no such projector: … (MMPROJ_FILE)` | The projector was never fetched: `./pull-mmproj.sh`, or go back to text-only with `MMPROJ_FILE=none`. |
+| Random `llama-server` crashes, mid-generation included, with a projector loaded | mmproj is unstable on `gfx1151`. Text-only (`MMPROJ_FILE=none`, what `.env` ships) is the supported configuration. |
 | `serve.sh: … config.sh not found` | Stack is built only up to the download step; finish a `setup` run. |
 | Port 8080 already in use | Change `STRIX_PORT`. |
+| Rebuild "succeeded" but the pins are unchanged | The installer layer came from the cache. Rebuild with `./pull-models.sh` / `./pull-models-podman.sh` (they pass a fresh `BUILD_ID`), or `docker compose build --no-cache setup`. |
 | Weird symbol errors after a build that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo` and rebuild from scratch. |
 
 ## 13. Reference
@@ -398,8 +420,9 @@ the host filesystem.
 Dockerfile              Fedora 44 + AMD ROCm 10.0 gfx1151 SDK + build dependencies
 compose.yaml            setup (profile "setup") and server services
 .env / .env.example     host paths, port, credentials, launcher knobs, weight overrides
-pull-models.sh          wrapper around the setup service (POSIX sh)
-pull-mmproj.sh          fetches the default vision projector into STRIX_MODEL_DIR (wget, hash-verified)
+pull-models.sh          rebuilds the image, then wraps the setup service (POSIX sh)
+pull-models-podman.sh   same for podman / podman-compose (builds the image with `podman build`)
+pull-mmproj.sh          fetches the vision projector into STRIX_MODEL_DIR (wget, hash-verified)
 serve.sh                entrypoint of the `server` service; tuned launch + weight overrides
 state/                  build output + generated launchers (created on first run)
 models/                 weights (created on first run)
