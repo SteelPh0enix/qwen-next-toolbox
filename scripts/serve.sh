@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
 # overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
-# README section 9). Projector: empty MMPROJ_FILE = mmproj-F16.gguf, fetched by ./setup.sh
-# --mmproj; MMPROJ_FILE=none drops --mmproj. Projector support crashes llama-server on this
-# stack, so .env ships none.
+# README section 9).
+# Projector: empty MMPROJ_FILE = mmproj-F16.gguf, fetched by ./setup.sh --mmproj;
+# MMPROJ_FILE=none drops --mmproj. Projector support crashes llama-server on this stack, so
+# .env ships none.
 #
 # Paths to the built engine and to the pinned weights come from the config.sh that the
 # installer writes; only the model selection is overridden here, never the ROCm wiring.
@@ -29,14 +30,18 @@ source "$config"
 [[ -x ${STRIX_GENERIC_WRAPPER:-} ]] || die "$config does not define an executable STRIX_GENERIC_WRAPPER"
 
 model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
-draft=${DRAFT_MODEL:-${STRIX_DFLASH_MODEL-}}
+
+# Draft: a file = sidecar MTP draft; builtin = the nextn head inside the main GGUF, so the spec
+# block stays but carries no --spec-draft-model; none/empty = no speculation.
+draft=${DRAFT_MODEL-${STRIX_DFLASH_MODEL:-}}
 [[ $draft == none ]] && draft=''
+[[ -n $draft && $draft != builtin ]] && draft=$(resolve "$draft")
 mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-F16.gguf}}
 [[ $mmproj == none ]] && mmproj=''
 [[ -n $mmproj ]] && mmproj=$(resolve "$mmproj")
 
 [[ -f $model ]] || die "no such model: $model (MODEL_FILE)"
-[[ -z $draft || -f $draft ]] || die "no such draft model: $draft (DRAFT_MODEL)"
+[[ -z $draft || $draft == builtin || -f $draft ]] || die "no such draft model: $draft (DRAFT_MODEL)"
 [[ -z $mmproj || -f $mmproj ]] || die "no such projector: $mmproj (MMPROJ_FILE; fetch it with ./setup.sh --mmproj, disable with MMPROJ_FILE=none)"
 
 draft_n_max=${MTP_N_MAX:-3}
@@ -61,13 +66,10 @@ args=(
   --jinja
 )
 if ((draft_n_max > 0)) && [[ -n $draft ]]; then
-  args+=(
-    --spec-type draft-mtp
-    --spec-draft-model "$draft"
-    --spec-draft-device ROCm0
-    --spec-draft-ngl 99
-    --spec-draft-n-max "$draft_n_max"
-  )
+  args+=(--spec-type draft-mtp --spec-draft-n-max "$draft_n_max")
+  if [[ $draft != builtin ]]; then
+    args+=(--spec-draft-model "$draft" --spec-draft-device ROCm0 --spec-draft-ngl 99)
+  fi
 fi
 if [[ -n $mmproj ]]; then
   args+=(--mmproj "$mmproj" --mmproj-device ROCm0)

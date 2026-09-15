@@ -330,6 +330,7 @@ quantized fine-tune. Put it in `STRIX_MODEL_DIR` and name it in `.env` (or per i
 ```bash
 MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server      # split set: name shard 1
 MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
+MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=builtin docker compose up -d server      # MTP head inside the main GGUF
 MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server         # no draft -> no speculation
 MMPROJ_FILE=mmproj-F16.gguf docker compose up -d server                              # vision: unstable, see below
 # Weights already on disk elsewhere: mount them with STRIX_MODEL_DIR_EXTRA (at /models-extra) and
@@ -341,7 +342,7 @@ STRIX_MODEL_DIR_EXTRA=/data/models/UD-Q4_K_XL \
 | Variable | Meaning |
 | :-- | :-- |
 | `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is (`/models-extra/...` for `STRIX_MODEL_DIR_EXTRA`). Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
-| `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (use when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
+| `DRAFT_MODEL` | MTP draft. A file (bare name = under `/models`) loads that sidecar draft; `builtin` keeps `--spec-type draft-mtp` but drops `--spec-draft-model`, so the MTP context runs on the nextn head inside `MODEL_FILE`; `none` drops the whole `--spec-*` block. Default: the pinned `mtp-…-shared-Q8_0.gguf`. `builtin` needs weights converted with the MTP tensors — a file without them fails at load naming missing `blk.N.nextn.*` tensors. |
 | `MMPROJ_FILE` | vision projector. `.env` ships `none`, which drops `--mmproj` (text only) — mmproj crashes `llama-server` on this stack, random kills mid-generation included. Empty means `mmproj-F16.gguf` (`./setup.sh --mmproj` fetches it); any projector works as a bare name under `/models`, but avoid the `mmproj-BF16.gguf` the same repository publishes. Adds ~1 GiB of resident memory on top of the LLM. |
 
 `serve.sh` checks that every file it was told to use exists and exits naming the offending variable.
@@ -372,7 +373,7 @@ Set in `.env`, or per invocation (`CTX_SIZE=32768 docker compose up -d server`).
 | :-- | :-- | :-- |
 | `CTX_SIZE` | `262144` | Set here; upstream's launcher defaults to `65536`. The memory-limiting knob on 128 GB — with `-fit off` nothing is auto-shrunk, so an impossible request fails instead of backing off. Drop to `65536`/`131072` if the model loads but a long prompt does not. |
 | `BATCH_SIZE` / `UBATCH_SIZE` | `16384` | The tuned prefill path. Larger ubatch measures the same within error and costs ~8 GiB of compute buffers. |
-| `MTP_N_MAX` | `3` | MTP draft width. `0` disables speculation — `serve.sh` then skips loading the draft entirely. |
+| `MTP_N_MAX` | `3` | MTP draft width. `0` disables speculation — `serve.sh` then skips the draft entirely, `builtin` included. |
 | `PARALLEL` | `1` | Slots. Each extra slot costs KV memory and decode throughput on an APU. |
 | `ENABLE_RETAINED_PM4` | `1` | The fork's retained PM4 command lists. `0` sets `GGML_CUDA_DISABLE_GRAPHS=1` — A/B control, or if graphs misbehave. |
 | `GPU_MAX_HW_QUEUES` | `1` | Keeps the iGPU from latching to max clock when idle. |
@@ -407,6 +408,8 @@ the host filesystem.
 | Download stalls or a shard is corrupt | Rerun `./setup.sh`. To discard half-finished data: `rm -rf "$STRIX_MODEL_DIR/.cache/huggingface"`. |
 | `server` starts and immediately exits with `No such file or directory` | Launchers do not exist yet — finish a `setup` run. |
 | `serve.sh: no such model: … (MODEL_FILE)` | Typo, or the file is not under `STRIX_MODEL_DIR` (`/models`). Absolute paths must be mounted separately. |
+| `serve.sh: no such draft model: … (DRAFT_MODEL)` | Typo, or the file is not under `STRIX_MODEL_DIR`. Use `DRAFT_MODEL=builtin` when the main GGUF carries its own MTP head. |
+| Load fails with missing `blk.N.nextn.*` tensors under `DRAFT_MODEL=builtin` | Those weights were converted without the MTP head. Serve the sidecar draft instead, or `DRAFT_MODEL=none`. |
 | `serve.sh: no such projector: … (MMPROJ_FILE)` | The projector was never fetched: `./setup.sh --mmproj`, or go back to text-only with `MMPROJ_FILE=none`. |
 | Random `llama-server` crashes, mid-generation included, with a projector loaded | mmproj is unstable on `gfx1151`. Text-only (`MMPROJ_FILE=none`, what `.env` ships) is the supported configuration. |
 | `serve.sh: … config.sh not found` | Stack is built only up to the download step; finish a `setup` run. |
