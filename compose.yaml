@@ -5,10 +5,11 @@ x-toolbox: &toolbox
   build:
     context: .
     args:
-      # Bumped by ./pull-models.sh / ./pull-models-podman.sh so that the layer fetching the
-      # upstream installer (and with it the pins) is always rebuilt; the ROCm layers above it
-      # stay cached. A plain `docker compose build` keeps the cached installer.
+      # Bumped by ./setup.sh -u so that the layer fetching the upstream installer (and with
+      # it the pins) is rebuilt; the ROCm layers above it stay cached. STRIX_HALO_REF pins
+      # the installer itself - the rollback path, see the README update guide.
       BUILD_ID: ${BUILD_ID:-0}
+      STRIX_HALO_REF: ${STRIX_HALO_REF:-main}
   # Rootless-friendly: no privileged mode, no added capabilities. The GIDs below are only
   # needed when the container runs unprivileged and your udev rules are stricter than 0666.
   devices:
@@ -35,7 +36,7 @@ x-toolbox: &toolbox
     # file inside it from MODEL_FILE with an absolute /models-extra/... path. Falls back to
     # STRIX_MODEL_DIR when STRIX_MODEL_DIR_EXTRA is empty.
     - ${STRIX_MODEL_DIR_EXTRA:-${STRIX_MODEL_DIR:-./models}}:/models-extra
-    - ./serve.sh:/opt/toolbox/serve.sh:ro
+    - ./scripts/serve.sh:/opt/toolbox/serve.sh:ro
   environment:
     HF_TOKEN: ${HF_TOKEN:-}
 

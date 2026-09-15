@@ -72,8 +72,8 @@ RUN mkdir -m 0777 -p /home/strix /models
 #   docker build --build-arg STRIX_HALO_REF=fa16925 .
 ARG STRIX_HALO_REF=main
 # The pins recorded in these scripts are the update mechanism, so this layer must never be a cache
-# hit. The helper scripts change BUILD_ID on every run, which invalidates this fetch and nothing
-# else: the ROCm SDK layers are reused from the cache. Manually: BUILD_ID=$(date -u +%s) docker compose build setup
+# hit. `./setup.sh -u` passes a fresh BUILD_ID, which invalidates this fetch and nothing else:
+# the ROCm SDK layers are reused from the cache.
 ARG BUILD_ID=0
 RUN <<EOF
 set -eux

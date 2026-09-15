@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
 # overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
-# README section 9). Projector: empty MMPROJ_FILE = mmproj-F16.gguf, fetched by ./pull-models.sh
-# (./pull-mmproj.sh on its own); MMPROJ_FILE=none drops --mmproj. Projector support crashes
-# llama-server on this stack, so .env ships none.
+# README section 9). Projector: empty MMPROJ_FILE = mmproj-F16.gguf, fetched by ./setup.sh
+# --mmproj; MMPROJ_FILE=none drops --mmproj. Projector support crashes llama-server on this
+# stack, so .env ships none.
 #
 # Paths to the built engine and to the pinned weights come from the config.sh that the
 # installer writes; only the model selection is overridden here, never the ROCm wiring.
@@ -23,7 +23,7 @@ resolve() {
 }
 
 config=${STRIX_HALO_INSTALL_ROOT:-$HOME/.local/share/qwen3.8-strix-halo}/config.sh
-[[ -r $config ]] || die "$config not found - build the stack first (./pull-models.sh)"
+[[ -r $config ]] || die "$config not found - build the stack first (./setup.sh)"
 # shellcheck disable=SC1090
 source "$config"
 [[ -x ${STRIX_GENERIC_WRAPPER:-} ]] || die "$config does not define an executable STRIX_GENERIC_WRAPPER"
@@ -37,7 +37,7 @@ mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-F16.gguf}}
 
 [[ -f $model ]] || die "no such model: $model (MODEL_FILE)"
 [[ -z $draft || -f $draft ]] || die "no such draft model: $draft (DRAFT_MODEL)"
-[[ -z $mmproj || -f $mmproj ]] || die "no such projector: $mmproj (MMPROJ_FILE; fetch it with ./pull-mmproj.sh, disable with MMPROJ_FILE=none)"
+[[ -z $mmproj || -f $mmproj ]] || die "no such projector: $mmproj (MMPROJ_FILE; fetch it with ./setup.sh --mmproj, disable with MMPROJ_FILE=none)"
 
 draft_n_max=${MTP_N_MAX:-3}
 
