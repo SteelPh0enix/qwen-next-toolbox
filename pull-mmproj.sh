@@ -2,15 +2,16 @@
 # Fetch the vision projector that serve.sh loads by default, into STRIX_MODEL_DIR (see .env).
 #
 # The projector is not part of the upstream installer's pinned set, so it is pinned here:
-# unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-BF16.gguf, SHA-256 verified, partial files resumed.
+# unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf, SHA-256 verified, partial files resumed. The
+# repository also publishes mmproj-BF16.gguf, which is unstable in practice - not pinned here.
 # Called by ./pull-models.sh and ./pull-models-podman.sh; safe to run on its own. Needs wget.
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
-file=mmproj-BF16.gguf
+file=mmproj-F16.gguf
 url=https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/$file
-size=907542944
-sha256=2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355
+size=904004000
+sha256=1f7b7f0b984cf065c604360c29c8098362ed61b290db0ff12c6f360bb1a8a980
 
 model_dir=${STRIX_MODEL_DIR:-}
 if [ -z "$model_dir" ] && [ -f "$here/.env" ]; then
@@ -39,7 +40,7 @@ mkdir -p "$model_dir"
 if [ -f "$target" ]; then
   printf 'projector     -> %s (resuming the partial download)\n' "$target"
 else
-  printf 'projector     -> %s (866 MiB)\n' "$target"
+  printf 'projector     -> %s (862 MiB)\n' "$target"
 fi
 wget -c -O "$target" "$url"
 [ "$(sum "$target")" = "$sha256" ] || {

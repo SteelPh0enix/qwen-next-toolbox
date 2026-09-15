@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
 # overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
-# README section 8). Vision is on by default: mmproj-BF16.gguf, fetched by ./pull-models.sh
+# README section 9). Vision is on by default: mmproj-F16.gguf, fetched by ./pull-models.sh
 # (./pull-mmproj.sh on its own); set MMPROJ_FILE=none to drop the projector.
 #
 # Paths to the built engine and to the pinned weights come from the config.sh that the
@@ -30,7 +30,7 @@ source "$config"
 model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
 draft=${DRAFT_MODEL:-${STRIX_DFLASH_MODEL-}}
 [[ $draft == none ]] && draft=''
-mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-BF16.gguf}}
+mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-F16.gguf}}
 [[ $mmproj == none ]] && mmproj=''
 [[ -n $mmproj ]] && mmproj=$(resolve "$mmproj")
 
