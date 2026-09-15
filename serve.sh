@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
-# overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE - see README section 8).
+# overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
+# README section 8).
 #
 # Paths to the built engine and to the pinned weights come from the config.sh that the
 # installer writes; only the model selection is overridden here, never the ROCm wiring.
@@ -39,6 +40,7 @@ draft_n_max=${MTP_N_MAX:-3}
 
 args=(
   -m "$model"
+  --alias "${MODEL_ALIAS:-Qwen 3.8 Flash Next}"
   -dev ROCm0
   -ngl 999
   -fa on

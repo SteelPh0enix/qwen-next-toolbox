@@ -57,5 +57,6 @@ services:
       MODEL_FILE: ${MODEL_FILE:-}
       DRAFT_MODEL: ${DRAFT_MODEL:-}
       MMPROJ_FILE: ${MMPROJ_FILE:-}
+      MODEL_ALIAS: ${MODEL_ALIAS:-Qwen 3.8 Flash Next}
     entrypoint: ["/opt/toolbox/serve.sh"]
     command: ["--host", "0.0.0.0", "--port", "8080"]

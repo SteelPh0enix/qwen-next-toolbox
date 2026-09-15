@@ -133,6 +133,7 @@ Docker; both mounted directories must be writable by the container user.
 | `STRIX_SHM_SIZE` | `8g` | `/dev/shm` size. |
 | `MODEL_FILE`, `DRAFT_MODEL`, `MMPROJ_FILE` | pinned set | Weights to serve — see [section 8](#8-other-weights-and-arbitrary-models). |
 | `CTX_SIZE`, `BATCH_SIZE`, `UBATCH_SIZE`, `PARALLEL`, `MTP_N_MAX`, `ENABLE_RETAINED_PM4`, `GPU_MAX_HW_QUEUES` | see [tuning](#9-tuning) | Launcher knobs. |
+| `MODEL_ALIAS` | `Qwen 3.8 Flash Next` | Model name reported to API clients (`--alias`). |
 
 ## 5. Build the image
 
@@ -218,8 +219,8 @@ docker compose stop server             # or: down
 `serve.sh` (mounted from this repo at `/opt/toolbox/serve.sh`) applies the tuned configuration:
 `-dev ROCm0 -ngl 999 -fa on -fit off`, `--load-mode none --lazy-mode on-direct` (keeps the 27.5 GB
 per-layer embedding table out of the resident set), `f16` KV, 262144-token context (this toolbox's
-default; upstream's launcher ships 65536), 16384 batch and ubatch, `--jinja`, and MTP speculation
-with draft width 3 on the same device. It reads the engine and pinned-weight paths from
+default; upstream's launcher ships 65536), 16384 batch and ubatch, `--jinja`, `--alias` (see
+[section 9](#9-tuning)), and MTP speculation with draft width 3 on the same device. It reads the engine and pinned-weight paths from
 `state/.local/share/qwen3.8-strix-halo/config.sh` and never re-derives them.
 
 Extra `llama-server` arguments appended to the service come last, so they win:
@@ -264,7 +265,7 @@ MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server     
 
 | Variable | Meaning |
 | :-- | :-- |
-| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. |
+| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
 | `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (use when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
 | `MMPROJ_FILE` | optional vision projector, off by default — the pinned flash-next weights are text only. |
 
@@ -300,6 +301,7 @@ Set in `.env`, or per invocation (`CTX_SIZE=32768 docker compose up -d server`).
 | `PARALLEL` | `1` | Slots. Each extra slot costs KV memory and decode throughput on an APU. |
 | `ENABLE_RETAINED_PM4` | `1` | The fork's retained PM4 command lists. `0` sets `GGML_CUDA_DISABLE_GRAPHS=1` — A/B control, or if graphs misbehave. |
 | `GPU_MAX_HW_QUEUES` | `1` | Keeps the iGPU from latching to max clock when idle. |
+| `MODEL_ALIAS` | `Qwen 3.8 Flash Next` | Name served to API clients (`--alias`); comma-separated for several. Shows up in `/props`, `/v1/models`, and the `model` field of completions. |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.5.1` | Set by the launcher; only override if you know why. |
 | `GGML_HIP_ENABLE_UNIFIED_MEMORY` | `1` | Set by the launcher. |
 
