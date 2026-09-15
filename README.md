@@ -166,6 +166,7 @@ Docker; both mounted directories must be writable by the container user.
 | :-- | :-- | :-- |
 | `STRIX_STATE_DIR` | `./state` | Mounted as the container's `$HOME`: checkouts, build trees, venv, HF cache, generated launchers. Delete to start over. |
 | `STRIX_MODEL_DIR` | `./models` | Mounted at `/models`; where the weights live. |
+| `STRIX_MODEL_DIR_EXTRA` | empty | Extra host weights directory mounted at `/models-extra`; defaults to `STRIX_MODEL_DIR` when empty. |
 | `STRIX_PORT` | `8080` | Host port for the API. |
 | `JOBS` | `16` | Build parallelism for `setup`. |
 | `HF_TOKEN` | empty | Only if the weight repository is gated. |
@@ -311,11 +312,15 @@ MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server  
 MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
 MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server         # no draft -> no speculation
 MMPROJ_FILE=none docker compose up -d server                                        # text only, no projector
+# Weights already on disk elsewhere: mount them with STRIX_MODEL_DIR_EXTRA (at /models-extra) and
+# use the absolute container path:
+STRIX_MODEL_DIR_EXTRA=/data/models/UD-Q4_K_XL \
+  MODEL_FILE=/models-extra/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf docker compose up -d server
 ```
 
 | Variable | Meaning |
 | :-- | :-- |
-| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
+| `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is (`/models-extra/...` for `STRIX_MODEL_DIR_EXTRA`). Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
 | `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (use when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
 | `MMPROJ_FILE` | vision projector, on by default with `mmproj-F16.gguf` (`./pull-mmproj.sh`). `none` drops `--mmproj`; any other projector file works as a bare name under `/models`, but avoid the `mmproj-BF16.gguf` the same repository publishes — bf16 projectors are unstable. Adds ~1 GiB of resident memory on top of the LLM. |
 

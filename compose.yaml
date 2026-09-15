@@ -25,6 +25,10 @@ x-toolbox: &toolbox
   volumes:
     - ${STRIX_STATE_DIR:-./state}:/home/strix
     - ${STRIX_MODEL_DIR:-./models}:/models
+    # Optional second weights mount for weights that already live elsewhere on the host; name a
+    # file inside it from MODEL_FILE with an absolute /models-extra/... path. Falls back to
+    # STRIX_MODEL_DIR when STRIX_MODEL_DIR_EXTRA is empty.
+    - ${STRIX_MODEL_DIR_EXTRA:-${STRIX_MODEL_DIR:-./models}}:/models-extra
     - ./serve.sh:/opt/toolbox/serve.sh:ro
   environment:
     HF_TOKEN: ${HF_TOKEN:-}
