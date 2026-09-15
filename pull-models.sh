@@ -6,7 +6,7 @@
 # the pins here. Build steps are incremental no-ops once the stack is built, and the run
 # ends by writing the launchers into state/.
 #
-#   ./pull-models.sh                  # start or resume (~96 GiB total)
+#   ./pull-models.sh                  # start or resume (~97 GiB total, incl. the vision projector)
 #   ./pull-models.sh --jobs 8         # extra flags go to the installer
 #
 # Interrupt it whenever you like: `hf` resumes partial files and every finished file is
@@ -25,5 +25,8 @@ printf 'builds, launchers  -> %s/state\n\n' "$here"
 
 docker compose --project-directory "$here" --profile setup run --rm setup \
   bash /opt/strix-halo/install-flash-next.sh --skip-packages --model-dir /models "$@"
+
+# The default vision projector comes from this repo, not from the installer's pins.
+sh "$here/pull-mmproj.sh"
 
 printf '\nlaunchers written to %s/state/.local/bin/\nstart with: docker compose up -d server\n' "$here"

@@ -34,7 +34,7 @@ You need: Linux x86_64 with `amdgpu` loaded, Docker + Compose v2, 128 GB unified
 ```bash
 cp .env.example .env                  # 1. config; defaults are fine for rootless Docker
 docker compose build setup            # 2. image (~9 GB, needs network)
-./pull-models.sh                      # 3. compile ROCr/HIP/llama.cpp + download ~96 GiB weights
+./pull-models.sh                      # 3. compile ROCr/HIP/llama.cpp + download ~97 GiB weights
 docker compose up -d server           # 4. serve on http://localhost:8080
 curl -s localhost:8080/health         # {"status":"ok"} once loaded — loading 93 GiB takes a while
 ```
@@ -71,7 +71,7 @@ Everything below explains those commands and the knobs you can turn.
 | ROCr runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
 | HIP runtime | same fork, `projects/clr` + `projects/hip` | `libamdhip64.so.7.16`, built into the state directory |
 | Engine | `pwilkin/llama.cpp@strix-halo` (`d67d5883`) — UMA scheduler ring, wave32 `TOP_K`, gfx1151 tuning, MTP speculative decoding | `llama-server`, `llama-bench`, `test-backend-sched-ring` |
-| Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB). Text only, no vision projector |
+| Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo`, `unsloth/Qwen3.8-Flash-Next-GGUF` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB) + `mmproj-BF16.gguf` vision projector (0.9 GiB) |
 | ROCm SDK | AMD Core SDK 10.0 (TheRock stream), `amdrocm{,-core-devel}10.0-gfx1151` | `hipcc`, AMD LLVM, rocBLAS/hipBLAS with gfx1151 kernels, `amd_comgr`, `rocprofiler-register` |
 
 Upstream's numbers for this configuration on one Radeon 8060S, 16384 batch/ubatch:
@@ -95,7 +95,7 @@ awk '$1 == "gfx_target_version" && $2 != 0 { print $2 }' \
 * `amdgpu` loaded, `gfx1151` visible in the KFD topology, `gc_11_5_0` firmware present — a kernel
   from 2025 or newer is a safe bet. The container inherits whatever your user can open.
 * Docker Engine with the Compose v2 plugin; `memlock` as high as possible.
-* Disk: ~110 GiB for weights (96 GiB + headroom) and ~3 GiB for build state. Both directories may
+* Disk: ~110 GiB for weights (97 GiB + headroom) and ~3 GiB for build state. Both directories may
   live anywhere — they are bind-mounted.
 * 128 GB unified memory. The model does not fit in 64 GB; there is no smaller profile to fall back
   to here (see [the 27B variant](#the-27b-variant)).
@@ -165,7 +165,9 @@ repo); pin a commit with `--build-arg STRIX_HALO_REF=<sha>`.
 4. builds ROCr, then HIP against that ROCr, then `llama.cpp` for `gfx1151`, and verifies
    `libggml-hip.so` resolves `libamdhip64`/`libhsa-runtime64` through the fresh prefixes, not the SDK;
 5. downloads the 9 shards and the MTP draft into `STRIX_MODEL_DIR`, SHA-256 verifying each;
-6. writes `qwen3.8-strix-halo-server` and `llama-server-strix-halo` into `state/.local/bin/`.
+6. writes `qwen3.8-strix-halo-server` and `llama-server-strix-halo` into `state/.local/bin/`;
+7. fetches `mmproj-BF16.gguf` (the vision projector `serve.sh` loads by default) through
+   `pull-mmproj.sh` — hash-verified and resumable like the rest, `wget` on the host.
 
 **Resumable:** git pins are re-checked, CMake builds are incremental, `hf` resumes partial files
 from `<STRIX_MODEL_DIR>/.cache/huggingface` (delete it to restart a shard from scratch), and any
@@ -187,6 +189,10 @@ A mismatch is a hard error, not a silent re-download — fix or delete the offen
 This section is only about the *pinned* files; other weights need no `setup` run
 ([section 8](#8-other-weights-and-arbitrary-models)). `setup` always fetches the pinned set; if you
 never serve it, you can delete those files afterwards (rerunning `setup` downloads them again).
+
+The vision projector is the one exception: it is not in the upstream pins, so `pull-mmproj.sh` pins
+`mmproj-BF16.gguf` from [`unsloth/Qwen3.8-Flash-Next-GGUF`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)
+and keeps it in `STRIX_MODEL_DIR`, with the same verify-or-refuse rule.
 
 ### The 27B variant
 
@@ -220,8 +226,10 @@ docker compose stop server             # or: down
 `-dev ROCm0 -ngl 999 -fa on -fit off`, `--load-mode none --lazy-mode on-direct` (keeps the 27.5 GB
 per-layer embedding table out of the resident set), `f16` KV, 262144-token context (this toolbox's
 default; upstream's launcher ships 65536), 16384 batch and ubatch, `--jinja`, `--alias` (see
-[section 9](#9-tuning)), and MTP speculation with draft width 3 on the same device. It reads the engine and pinned-weight paths from
-`state/.local/share/qwen3.8-strix-halo/config.sh` and never re-derives them.
+[section 9](#9-tuning)), MTP speculation with draft width 3 on the same device, and the vision
+projector (`--mmproj mmproj-BF16.gguf --mmproj-device ROCm0`; `MMPROJ_FILE=none` for text only). It
+reads the engine and pinned-weight paths from `state/.local/share/qwen3.8-strix-halo/config.sh` and
+never re-derives them.
 
 Extra `llama-server` arguments appended to the service come last, so they win:
 
@@ -261,13 +269,14 @@ quantized fine-tune. Put it in `STRIX_MODEL_DIR` and name it in `.env` (or per i
 MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server      # split set: name shard 1
 MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
 MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server         # no draft -> no speculation
+MMPROJ_FILE=none docker compose up -d server                                        # text only, no projector
 ```
 
 | Variable | Meaning |
 | :-- | :-- |
 | `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is. Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
 | `DRAFT_MODEL` | MTP draft. `none` drops the whole `--spec-*` block (use when no draft matches the quant). Default: the pinned `mtp-…-shared-Q8_0.gguf`. |
-| `MMPROJ_FILE` | optional vision projector, off by default — the pinned flash-next weights are text only. |
+| `MMPROJ_FILE` | vision projector, on by default with `mmproj-BF16.gguf` (`./pull-mmproj.sh`). `none` drops `--mmproj`; any other quant of the projector (`mmproj-F16.gguf`) works as a bare name under `/models`. Adds ~1 GiB of resident memory on top of the LLM. |
 
 `serve.sh` checks that every file it was told to use exists and exits naming the offending variable.
 Arguments appended to the service still come last, so
@@ -332,6 +341,7 @@ the host filesystem.
 | Download stalls or a shard is corrupt | Rerun `./pull-models.sh`. To discard half-finished data: `rm -rf "$STRIX_MODEL_DIR/.cache/huggingface"`. |
 | `server` starts and immediately exits with `No such file or directory` | Launchers do not exist yet — finish a `setup` run. |
 | `serve.sh: no such model: … (MODEL_FILE)` | Typo, or the file is not under `STRIX_MODEL_DIR` (`/models`). Absolute paths must be mounted separately. |
+| `serve.sh: no such projector: … (MMPROJ_FILE)` | Weights pulled before the projector was pinned: `./pull-mmproj.sh`, or serve text-only with `MMPROJ_FILE=none`. |
 | `serve.sh: … config.sh not found` | Stack is built only up to the download step; finish a `setup` run. |
 | Port 8080 already in use | Change `STRIX_PORT`. |
 | Weird symbol errors after a build that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo` and rebuild from scratch. |
@@ -343,6 +353,7 @@ Dockerfile              Fedora 44 + AMD ROCm 10.0 gfx1151 SDK + build dependenci
 compose.yaml            setup (profile "setup") and server services
 .env / .env.example     host paths, port, credentials, launcher knobs, weight overrides
 pull-models.sh          wrapper around the setup service (POSIX sh)
+pull-mmproj.sh          fetches the default vision projector into STRIX_MODEL_DIR (wget, hash-verified)
 serve.sh                entrypoint of the `server` service; tuned launch + weight overrides
 state/                  build output + generated launchers (created on first run)
 models/                 weights (created on first run)
