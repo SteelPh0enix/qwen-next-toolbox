@@ -49,9 +49,16 @@ services:
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
       JOBS: ${JOBS:-16}
-    command: ["bash", "/opt/strix-halo/install-flash-next.sh", "--skip-packages", "--model-dir", "/models"]
+    command:
+      [
+        "bash",
+        "/opt/strix-halo/install-flash-next.sh",
+        "--skip-packages",
+        "--model-dir",
+        "/models",
+      ]
 
-  # The tuned server: 64k context, 16384 batch/ubatch, MTP draft width 3.
+  # The tuned server: 256k context, 16384 batch/ubatch, MTP draft width 3.
   server:
     <<: *toolbox
     ports:
