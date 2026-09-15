@@ -32,7 +32,7 @@ source "$config"
 model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
 
 # Draft: a file = sidecar MTP draft; builtin = the nextn head inside the main GGUF, so the spec
-# block stays but carries no --spec-draft-model; none/empty = no speculation.
+# block stays but carries no --spec-draft-model; none/empty = no MTP draft, ngram-mod unaffected.
 draft=${DRAFT_MODEL-${STRIX_DFLASH_MODEL:-}}
 [[ $draft == none ]] && draft=''
 [[ -n $draft && $draft != builtin ]] && draft=$(resolve "$draft")
@@ -45,6 +45,24 @@ mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-F16.gguf}}
 [[ -z $mmproj || -f $mmproj ]] || die "no such projector: $mmproj (MMPROJ_FILE; fetch it with ./setup.sh --mmproj, disable with MMPROJ_FILE=none)"
 
 draft_n_max=${MTP_N_MAX:-3}
+
+# ngram-mod is draftless speculation (~16 MB n-gram hash pool, shared by all slots): NGRAM_MOD=0
+# turns it off, and it keeps drafting when the MTP draft is off.
+ngram_mod=${NGRAM_MOD:-1}
+ngram_mod_n_match=${NGRAM_MOD_N_MATCH:-}
+ngram_mod_n_min=${NGRAM_MOD_N_MIN:-}
+ngram_mod_n_max=${NGRAM_MOD_N_MAX:-}
+
+# draft-mtp needs a draft (sidecar GGUF or the nextn head inside the main one); ngram-mod never does.
+spec_types=()
+draft_on=0
+if ((draft_n_max > 0)) && [[ -n $draft ]]; then
+  spec_types+=(draft-mtp)
+  draft_on=1
+fi
+if [[ $ngram_mod != 0 ]]; then
+  spec_types+=(ngram-mod)
+fi
 
 args=(
   -m "$model"
@@ -65,10 +83,19 @@ args=(
   --parallel "${PARALLEL:-1}"
   --jinja
 )
-if ((draft_n_max > 0)) && [[ -n $draft ]]; then
-  args+=(--spec-type draft-mtp --spec-draft-n-max "$draft_n_max")
-  if [[ $draft != builtin ]]; then
-    args+=(--spec-draft-model "$draft" --spec-draft-device ROCm0 --spec-draft-ngl 99)
+if ((${#spec_types[@]})); then
+  args+=(--spec-type "$(IFS=,; printf '%s' "${spec_types[*]}")")
+  if ((draft_on)); then
+    args+=(--spec-draft-n-max "$draft_n_max")
+    if [[ $draft != builtin ]]; then
+      args+=(--spec-draft-model "$draft" --spec-draft-device ROCm0 --spec-draft-ngl 99)
+    fi
+  fi
+  # Unset ngram knobs are not passed, so llama.cpp keeps its own defaults (24 / 48 / 64).
+  if [[ $ngram_mod != 0 ]]; then
+    if [[ -n $ngram_mod_n_match ]]; then args+=(--spec-ngram-mod-n-match "$ngram_mod_n_match"); fi
+    if [[ -n $ngram_mod_n_min ]]; then args+=(--spec-ngram-mod-n-min "$ngram_mod_n_min"); fi
+    if [[ -n $ngram_mod_n_max ]]; then args+=(--spec-ngram-mod-n-max "$ngram_mod_n_max"); fi
   fi
 fi
 if [[ -n $mmproj ]]; then

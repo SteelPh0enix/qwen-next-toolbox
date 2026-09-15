@@ -58,7 +58,7 @@ services:
         "/models",
       ]
 
-  # The tuned server: 256k context, 16384 batch/ubatch, MTP draft width 3.
+  # The tuned server: 256k context, 16384 batch/ubatch, MTP draft width 3 + draftless ngram-mod.
   server:
     <<: *toolbox
     ports:
@@ -70,6 +70,10 @@ services:
       UBATCH_SIZE: ${UBATCH_SIZE:-16384}
       PARALLEL: ${PARALLEL:-1}
       MTP_N_MAX: ${MTP_N_MAX:-3}
+      NGRAM_MOD: ${NGRAM_MOD:-1}
+      NGRAM_MOD_N_MATCH: ${NGRAM_MOD_N_MATCH:-}
+      NGRAM_MOD_N_MIN: ${NGRAM_MOD_N_MIN:-}
+      NGRAM_MOD_N_MAX: ${NGRAM_MOD_N_MAX:-}
       ENABLE_RETAINED_PM4: ${ENABLE_RETAINED_PM4:-1}
       GPU_MAX_HW_QUEUES: ${GPU_MAX_HW_QUEUES:-1}
       MODEL_FILE: ${MODEL_FILE:-}
