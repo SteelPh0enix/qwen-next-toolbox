@@ -3,7 +3,7 @@
 #
 #   ./setup.sh                image build (cached), then compile + download (resumable, hash-verified)
 #   ./setup.sh -u             refresh the upstream install scripts first (new pins), recompile
-#   ./setup.sh --mmproj       also fetch the vision projector (mmproj-F16.gguf, ~0.9 GiB)
+#   ./setup.sh --mmproj       also fetch the vision projector (mmproj-BF16.gguf, ~0.9 GiB)
 #   ./setup.sh --jobs 8       flags we do not know are passed to the upstream installer
 #
 # Everything lives in STRIX_MODEL_DIR and state/ (see .env); re-running verifies instead of
@@ -24,7 +24,7 @@ Qwen3.8-Next-Flash weights (main shards + MTP draft) into the model directory.
   -u, --update        rebuild with the latest install scripts from
                       pwilkin/strix-halo (fresh upstream pins; the ~9 GB of ROCm
                       layers are reused from the cache)
-      --mmproj        also download the vision projector (mmproj-F16.gguf)
+      --mmproj        also download the vision projector (mmproj-BF16.gguf)
       --use-docker    use Docker even when podman is available
       --use-podman    use podman even when Docker is available
   -h, --help          show this help
@@ -112,9 +112,9 @@ printf '\nstack     -> compiling and downloading the pinned weights (resumable, 
 # --- optional vision projector --------------------------------------------
 # Not part of the upstream installer's pins, so it is pinned here and fetched with wget.
 if ((mmproj)); then
-  file='mmproj-F16.gguf'
+  file='mmproj-BF16.gguf'
   url="https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/$file"
-  sha256=1f7b7f0b984cf065c604360c29c8098362ed61b290db0ff12c6f360bb1a8a980
+  sha256=2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355
   model_dir=${STRIX_MODEL_DIR:-}
   if [[ -z $model_dir && -f $here/.env ]]; then
     model_dir=$(sed -n 's/^STRIX_MODEL_DIR=//p' "$here/.env" | head -n 1)
@@ -131,7 +131,7 @@ if ((mmproj)); then
   else
     command -v wget >/dev/null || die 'wget is required to fetch the projector'
     mkdir -p "$model_dir"
-    printf 'projector -> %s (862 MiB, resumable)\n' "$target"
+    printf 'projector -> %s (866 MiB, resumable)\n' "$target"
     wget -c -O "$target" "$url"
     [[ $(sha256sum "$target" | cut -d' ' -f1) == "$sha256" ]] ||
       die "hash mismatch for $target - delete it and rerun"

@@ -124,7 +124,7 @@ STRIX_HALO_REF=<installer-sha> ./setup.sh   # rebuild the image around that inst
 | ROCr runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
 | HIP runtime | same fork, `projects/clr` + `projects/hip` | `libamdhip64.so.7.16`, built into the state directory |
 | Engine | `pwilkin/llama.cpp@strix-halo` (`d67d5883`) — UMA scheduler ring, wave32 `TOP_K`, gfx1151 tuning, MTP speculative decoding | `llama-server`, `llama-bench`, `test-backend-sched-ring` |
-| Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo`, `unsloth/Qwen3.8-Flash-Next-GGUF` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB) + `mmproj-F16.gguf` vision projector (0.9 GiB, served only if `MMPROJ_FILE` asks for it) |
+| Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo`, `unsloth/Qwen3.8-Flash-Next-GGUF` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB) + `mmproj-BF16.gguf` vision projector (0.9 GiB, served only if `MMPROJ_FILE` asks for it) |
 | ROCm SDK | AMD Core SDK 10.0 (TheRock stream), `amdrocm{,-core-devel}10.0-gfx1151` | `hipcc`, AMD LLVM, rocBLAS/hipBLAS with gfx1151 kernels, `amd_comgr`, `rocprofiler-register` |
 
 Upstream's numbers for this configuration on one Radeon 8060S, 16384 batch/ubatch:
@@ -247,7 +247,7 @@ This section is only about the *pinned* files; other weights need no `setup` run
 never serve it, you can delete those files afterwards (rerunning `setup` downloads them again).
 
 The vision projector is the one exception: it is not in the upstream pins, so this repo pins
-`mmproj-F16.gguf` from [`unsloth/Qwen3.8-Flash-Next-GGUF`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)
+`mmproj-BF16.gguf` from [`unsloth/Qwen3.8-Flash-Next-GGUF`](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)
 and `./setup.sh --mmproj` keeps it in `STRIX_MODEL_DIR` (wget, resumable), with the same
 verify-or-refuse rule. It is fetched only when asked for, and served only if `MMPROJ_FILE` names
 it — [section 9](#9-other-weights-and-arbitrary-models).
@@ -333,7 +333,7 @@ MODEL_FILE=Qwen3.8-Next-IQ4_XS-00001-of-00003.gguf docker compose up -d server  
 MODEL_FILE=my-merge-Q8_0.gguf DRAFT_MODEL=my-merge-mtp-Q8_0.gguf docker compose up -d server
 MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=builtin docker compose up -d server      # MTP head inside the main GGUF
 MODEL_FILE=some-model-IQ3.gguf DRAFT_MODEL=none docker compose up -d server         # no MTP draft (ngram-mod stays on)
-MMPROJ_FILE=mmproj-F16.gguf docker compose up -d server                              # vision: unstable, see below
+MMPROJ_FILE=mmproj-BF16.gguf docker compose up -d server                            # vision: unstable, see below
 # Weights already on disk elsewhere: mount them with STRIX_MODEL_DIR_EXTRA (at /models-extra) and
 # use the absolute container path:
 STRIX_MODEL_DIR_EXTRA=/data/models/UD-Q4_K_XL \
@@ -344,7 +344,7 @@ STRIX_MODEL_DIR_EXTRA=/data/models/UD-Q4_K_XL \
 | :-- | :-- |
 | `MODEL_FILE` | main weights. Bare name = under `/models`; absolute path = mounted into the container as-is (`/models-extra/...` for `STRIX_MODEL_DIR_EXTRA`). Default: the pinned shard `…-00001-of-00009.gguf`. Rename the served model with `MODEL_ALIAS`. |
 | `DRAFT_MODEL` | MTP draft. A file (bare name = under `/models`) loads that sidecar draft; `builtin` keeps `--spec-type draft-mtp` but drops `--spec-draft-model`, so the MTP context runs on the nextn head inside `MODEL_FILE`; `none` drops `draft-mtp` from `--spec-type` — `NGRAM_MOD=0` is what turns speculation off completely. Default: the pinned `mtp-…-shared-Q8_0.gguf`. `builtin` needs weights converted with the MTP tensors — a file without them fails at load naming missing `blk.N.nextn.*` tensors. |
-| `MMPROJ_FILE` | vision projector. `.env` ships `none`, which drops `--mmproj` (text only) — mmproj crashes `llama-server` on this stack, random kills mid-generation included. Empty means `mmproj-F16.gguf` (`./setup.sh --mmproj` fetches it); any projector works as a bare name under `/models`, but avoid the `mmproj-BF16.gguf` the same repository publishes. Adds ~1 GiB of resident memory on top of the LLM. |
+| `MMPROJ_FILE` | vision projector. `.env` ships `none`, which drops `--mmproj` (text only) — mmproj crashes `llama-server` on this stack, random kills mid-generation included. Empty means `mmproj-BF16.gguf` (`./setup.sh --mmproj` fetches it); any projector works as a bare name under `/models`. Adds ~1 GiB of resident memory on top of the LLM. |
 
 `serve.sh` checks that every file it was told to use exists and exits naming the offending variable.
 Arguments appended to the service still come last, so

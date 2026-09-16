@@ -2,7 +2,7 @@
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
 # overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
 # README section 9).
-# Projector: empty MMPROJ_FILE = mmproj-F16.gguf, fetched by ./setup.sh --mmproj;
+# Projector: empty MMPROJ_FILE = mmproj-BF16.gguf, fetched by ./setup.sh --mmproj;
 # MMPROJ_FILE=none drops --mmproj. Projector support crashes llama-server on this stack, so
 # .env ships none.
 #
@@ -18,8 +18,8 @@ die() {
 # Bare names and relative paths resolve under the model mount; absolute paths are used as they are.
 resolve() {
   case $1 in
-    /*) printf '%s' "$1" ;;
-    *) printf '%s/%s' /models "$1" ;;
+  /*) printf '%s' "$1" ;;
+  *) printf '%s/%s' /models "$1" ;;
   esac
 }
 
@@ -38,7 +38,7 @@ model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
 draft=${DRAFT_MODEL:-${STRIX_DFLASH_MODEL:-}}
 [[ $draft == none ]] && draft=''
 [[ -n $draft && $draft != builtin ]] && draft=$(resolve "$draft")
-mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-F16.gguf}}
+mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-BF16.gguf}}
 [[ $mmproj == none ]] && mmproj=''
 [[ -n $mmproj ]] && mmproj=$(resolve "$mmproj")
 
@@ -86,7 +86,10 @@ args=(
   --jinja
 )
 if ((${#spec_types[@]})); then
-  args+=(--spec-type "$(IFS=,; printf '%s' "${spec_types[*]}")")
+  args+=(--spec-type "$(
+    IFS=,
+    printf '%s' "${spec_types[*]}"
+  )")
   if ((draft_on)); then
     args+=(--spec-draft-n-max "$draft_n_max")
     if [[ $draft != builtin ]]; then
