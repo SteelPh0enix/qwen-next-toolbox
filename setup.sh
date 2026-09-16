@@ -4,7 +4,7 @@
 #   ./setup.sh                image build (cached), then compile + download (resumable, hash-verified)
 #   ./setup.sh -u             refresh the upstream install scripts first (new pins), recompile
 #   ./setup.sh --rebuild-state  wipe the build trees first, compile ROCr/HIP/llama.cpp from scratch
-#   ./setup.sh --mmproj       also fetch the vision projector (mmproj-BF16.gguf, ~0.9 GiB)
+#   ./setup.sh --no-mmproj    skip the vision projector download (mmproj-BF16.gguf, ~0.9 GiB)
 #   ./setup.sh --jobs 8       flags we do not know are passed to the upstream installer
 #
 # Everything lives in STRIX_MODEL_DIR and state/ (see .env); re-running verifies instead of
@@ -16,12 +16,12 @@ cd "$here"
 
 usage() {
   cat <<'EOF'
-Usage: ./setup.sh [-u] [--rebuild-state] [--mmproj]
+Usage: ./setup.sh [-u] [--rebuild-state] [--no-mmproj]
                   [--use-docker | --use-podman] [installer flags...]
 
 Builds the qwen-next-toolbox image, then runs the upstream installer from it: compiles
 the custom ROCr/HIP/llama.cpp stack into state/ and downloads the pinned
-Qwen3.8-Next-Flash weights (main shards + MTP draft) into the model directory.
+Qwen3.8-Next-Flash weights (main shards + MTP draft + vision projector) into the model directory.
 
   -u, --update        rebuild with the latest install scripts from
                       pwilkin/strix-halo (fresh upstream pins; the ~9 GB of ROCm
@@ -29,7 +29,7 @@ Qwen3.8-Next-Flash weights (main shards + MTP draft) into the model directory.
       --rebuild-state delete the ROCr/HIP/llama.cpp build trees in the state directory
                       before compiling: a from-scratch build for a stale CMake cache or a
                       suspect binary. The src checkouts, the venv and all weights are kept
-      --mmproj        also download the vision projector (mmproj-BF16.gguf)
+      --no-mmproj     skip the vision projector download (mmproj-BF16.gguf)
       --use-docker    use Docker even when podman is available
       --use-podman    use podman even when Docker is available
   -h, --help          show this help
@@ -69,7 +69,7 @@ image=qwen-next-toolbox:latest
 build_id_file=$here/.strix-build-id
 
 update=0
-mmproj=0
+mmproj=1
 rebuild_state=0
 engine=''
 installer_args=()
@@ -78,7 +78,7 @@ while (($#)); do
     -h | --help) usage; exit 0 ;;
     -u | --update) update=1 ;;
     --rebuild-state) rebuild_state=1 ;;
-    --mmproj) mmproj=1 ;;
+    --no-mmproj) mmproj=0 ;;
     --use-docker) engine=docker ;;
     --use-podman) engine=podman ;;
     *) installer_args+=("$1") ;;
@@ -201,7 +201,7 @@ printf '\nstack     -> compiling and downloading the pinned weights (resumable, 
 "${compose[@]}" --profile setup run --rm setup \
   bash /opt/strix-halo/install-flash-next.sh --skip-packages --model-dir /models "${installer_args[@]}"
 
-# --- optional vision projector --------------------------------------------
+# --- vision projector --------------------------------------------------------
 # Not part of the upstream installer's pins, so it is pinned here and fetched with wget.
 if ((mmproj)); then
   file='mmproj-BF16.gguf'
@@ -219,7 +219,7 @@ if ((mmproj)); then
     [[ $(sha256sum "$target" | cut -d' ' -f1) == "$sha256" ]] ||
       die "hash mismatch for $target - delete it and rerun"
   fi
-  printf '          note: serve it with MMPROJ_FILE=%s; it is unstable on this stack\n' "$file"
+  printf '          note: served by default; MMPROJ_FILE=none serves text-only\n'
 fi
 
 # --- record what this stack was built from --------------------------------

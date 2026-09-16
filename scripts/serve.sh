@@ -2,9 +2,8 @@
 # Entrypoint for the `server` service: the tuned Qwen3.8-Next-Flash launch, with the weights
 # overridable from the environment (MODEL_FILE, DRAFT_MODEL, MMPROJ_FILE, MODEL_ALIAS - see
 # README section 9).
-# Projector: empty MMPROJ_FILE = mmproj-BF16.gguf, fetched by ./setup.sh --mmproj;
-# MMPROJ_FILE=none drops --mmproj. Projector support crashes llama-server on this stack, so
-# .env ships none.
+# Projector: empty MMPROJ_FILE = the pinned mmproj-BF16.gguf when it exists (./setup.sh fetches it,
+# absent means text-only); MMPROJ_FILE=none drops --mmproj.
 #
 # Paths to the built engine and to the pinned weights come from the config.sh that the
 # installer writes; only the model selection is overridden here, never the ROCm wiring.
@@ -57,13 +56,25 @@ model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
 draft=${DRAFT_MODEL:-${STRIX_DFLASH_MODEL:-}}
 [[ $draft == none ]] && draft=''
 [[ -n $draft && $draft != builtin ]] && draft=$(resolve "$draft")
-mmproj=${MMPROJ_FILE:-${STRIX_MMPROJ_MODEL:-mmproj-BF16.gguf}}
+mmproj=${MMPROJ_FILE:-}
+mmproj_default=0
+if [[ -z $mmproj ]]; then
+  mmproj=${STRIX_MMPROJ_MODEL:-mmproj-BF16.gguf}
+  mmproj_default=1
+fi
 [[ $mmproj == none ]] && mmproj=''
 [[ -n $mmproj ]] && mmproj=$(resolve "$mmproj")
 
 [[ -f $model ]] || die "no such model: $model (MODEL_FILE)"
 [[ -z $draft || $draft == builtin || -f $draft ]] || die "no such draft model: $draft (DRAFT_MODEL)"
-[[ -z $mmproj || -f $mmproj ]] || die "no such projector: $mmproj (MMPROJ_FILE; fetch it with ./setup.sh --mmproj, disable with MMPROJ_FILE=none)"
+if [[ -n $mmproj && ! -f $mmproj ]]; then
+  if ((mmproj_default)); then
+    printf 'serve.sh: note: no projector at %s, serving text-only (./setup.sh fetches it)\n' "$mmproj" >&2
+    mmproj=''
+  else
+    die "no such projector: $mmproj (MMPROJ_FILE; fetch it with ./setup.sh, disable with MMPROJ_FILE=none)"
+  fi
+fi
 
 draft_n_max=${MTP_N_MAX:-3}
 
