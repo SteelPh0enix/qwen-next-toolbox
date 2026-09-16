@@ -29,6 +29,25 @@ config=${STRIX_HALO_INSTALL_ROOT:-$HOME/.local/share/qwen3.8-strix-halo}/config.
 source "$config"
 [[ -x ${STRIX_GENERIC_WRAPPER:-} ]] || die "$config does not define an executable STRIX_GENERIC_WRAPPER"
 
+# The built stack and the image it runs in move independently: a cached image build can re-point
+# :latest without the state directory changing. setup.sh stamps the pins it built from.
+stamp=$(dirname "$config")/pins.env
+installer=/opt/strix-halo/install.sh
+if [[ -r $stamp && -r $installer ]]; then
+  drift=()
+  for key in llama_repo_commit rocm_repo_commit; do
+    built=$(sed -n "s/^STRIX_${key^^}=//p" "$stamp")
+    pinned=$(sed -n "s/^readonly ${key}=//p" "$installer")
+    if [[ -n $built && -n $pinned && $built != "$pinned" ]]; then
+      drift+=("${key%%_repo_commit} built ${built:0:8}, image ${pinned:0:8}")
+    fi
+  done
+  if ((${#drift[@]})); then
+    printf 'serve.sh: WARNING the built stack and this image disagree: %s\n' "${drift[*]}" >&2
+    printf 'serve.sh: rerun ./setup.sh to build what the image pins\n' >&2
+  fi
+fi
+
 model=$(resolve "${MODEL_FILE:-$STRIX_MAIN_MODEL}")
 
 # Draft: empty = the pinned sidecar draft; a file = that sidecar draft; builtin = the nextn head

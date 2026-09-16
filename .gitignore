@@ -1,3 +1,4 @@
 .env
+.strix-build-id
 state/
 models/

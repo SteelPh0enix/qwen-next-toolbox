@@ -1,0 +1,8 @@
+# Nothing is copied into the image, so the context stays minimal: ~96 GiB of weights, the build
+# state and the host config (HF_TOKEN) never need to reach the daemon. podman reads this file too.
+state/
+models/
+*.gguf
+.env
+.strix-build-id
+.git/

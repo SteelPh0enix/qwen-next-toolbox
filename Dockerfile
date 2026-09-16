@@ -71,9 +71,11 @@ RUN mkdir -m 0777 -p /home/strix /models
 # `main` tracks upstream; pin a commit and rebuild to freeze them:
 #   docker build --build-arg STRIX_HALO_REF=fa16925 .
 ARG STRIX_HALO_REF=main
-# The pins recorded in these scripts are the update mechanism, so this layer must never be a cache
-# hit. `./setup.sh -u` passes a fresh BUILD_ID, which invalidates this fetch and nothing else:
-# the ROCm SDK layers are reused from the cache.
+# The pins recorded in these scripts are the update mechanism, so this layer must never come from
+# a stale cache entry. `./setup.sh -u` passes a fresh BUILD_ID, which invalidates this fetch and
+# nothing else; the ROCm SDK layers are reused. setup.sh remembers the id it used in
+# .strix-build-id and keeps passing it, so plain runs hit this same layer instead of the one from
+# the first build.
 ARG BUILD_ID=0
 RUN <<EOF
 set -eux

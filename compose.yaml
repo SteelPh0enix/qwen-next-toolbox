@@ -5,9 +5,12 @@ x-toolbox: &toolbox
   build:
     context: .
     args:
-      # Bumped by ./setup.sh -u so that the layer fetching the upstream installer (and with
-      # it the pins) is rebuilt; the ROCm layers above it stay cached. STRIX_HALO_REF pins
-      # the installer itself - the rollback path, see the README update guide.
+      # ./setup.sh -u bumps this so the layer fetching the upstream installer (and with it the
+      # pins) is rebuilt; the ROCm layers above it stay cached. The id it used is kept in
+      # .strix-build-id and reused by later runs, because BUILD_ID=0 would match the installer
+      # layer of the first build and move :latest back to its pins. Builds that bypass setup.sh
+      # land here. STRIX_HALO_REF pins the installer itself - the rollback path, see the README
+      # update guide.
       BUILD_ID: ${BUILD_ID:-0}
       STRIX_HALO_REF: ${STRIX_HALO_REF:-main}
   # Rootless-friendly: no privileged mode, no added capabilities. The GIDs below are only

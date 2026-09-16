@@ -80,14 +80,32 @@ re-downloaded, and `run.sh` restarts the server on the new binaries.
 at build time, so an update requires rebuilding the image. `-u` passes a `BUILD_ID` that changes
 on every run: the layer downloading the installer is then never a cache hit, so the new pins
 always land in the image, while the ~9 GB of ROCm layers are reused from the cache. A rebuild
-costs two small downloads — `--no-cache` is not needed. Without `-u` the image build is fully
-cached and the pins unchanged: a plain `./setup.sh` only recompiles and re-verifies against the
-installer already in the image.
+costs two small downloads — `--no-cache` is not needed. That id is then remembered in
+`.strix-build-id` and every later run passes the same one, so a plain `./setup.sh` re-hits the
+layer `-u` just built. It must not fall back to `BUILD_ID=0`, which is still a cache hit for the
+installer from the *first* build, and would move `:latest` - and the next compile - back to its
+older pins.
+
+Every run reports what it is about to build against; a bare commit means image and stack agree:
+
+```
+image     -> building from cache (use ./setup.sh -u to pick up upstream updates)
+pins      -> llama.cpp 7dda3ac6 -> 14fff4f9, rocm-systems 7dda3ac6
+```
+
+`STEP BACK` means the image pins older commits than `STRIX_STATE_DIR` was built from, and
+`setup.sh` stops rather than recompiling the stack backwards. A silently older image is a
+mistake; a deliberate move back is expressed by pinning the installer, so the same run is allowed
+with `STRIX_HALO_REF` set (below). `state/.local/share/qwen3.8-strix-halo/pins.env` records the
+pins of the last successful build, and `scripts/serve.sh` compares it against the image it starts
+in, warning in the server log when the two disagree.
 
 | Knob | Effect |
 | :-- | :-- |
+| `./setup.sh --rebuild-state` | delete `build/` and `runtime/` in the state directory first: a from-scratch compile of ROCr, HIP and llama.cpp, for a stale CMake cache or a binary that does not match its pins. The `src/` checkouts, the venv and every weight are kept |
 | `docker compose build --no-cache setup` (or `podman build --no-cache`) | rebuild everything incl. the AMD packages: slow, for a broken cache or a changed package set only |
 | `STRIX_HALO_REF=<installer-sha> ./setup.sh` | pin the installer itself — the rollback path, see below |
+| `rm -rf "$STRIX_STATE_DIR"` | start over from nothing, venv and download cache included: last resort |
 
 What the setup run does: it fast-forwards
 `state/.local/share/qwen3.8-strix-halo/src/llama.cpp` to the commit the new installer records,
@@ -99,7 +117,8 @@ hash-checked and kept. The checkouts must be clean: the
 installer refuses to move a tree with local changes rather than discard them
 (`git -C state/.local/share/qwen3.8-strix-halo/src/llama.cpp status`).
 
-Where you stand, and where the next update would take you (`podman run` works the same):
+Where you stand, and where the next update would take you — the `pins ->` line of every
+`setup.sh` run says exactly this; by hand (`podman run` works the same):
 
 ```bash
 git -C state/.local/share/qwen3.8-strix-halo/src/llama.cpp log --oneline -1   # built from
@@ -121,7 +140,7 @@ STRIX_HALO_REF=<installer-sha> ./setup.sh   # rebuild the image around that inst
 
 | Layer | Source | Result |
 | :-- | :-- | :-- |
-| ROCr runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
+| ROCm runtime | `pwilkin/rocm-systems@ilintar-experiments` (`7dda3ac`) — retained PM4 command lists | `libhsa-runtime64.so.1.21.0`, built into the state directory |
 | HIP runtime | same fork, `projects/clr` + `projects/hip` | `libamdhip64.so.7.16`, built into the state directory |
 | Engine | `pwilkin/llama.cpp@strix-halo` (`d67d5883`) — UMA scheduler ring, wave32 `TOP_K`, gfx1151 tuning, MTP speculative decoding | `llama-server`, `llama-bench`, `test-backend-sched-ring` |
 | Weights | `ilintar/qwen3.8-flash-next-gguf-strix-halo`, `unsloth/Qwen3.8-Flash-Next-GGUF` | 9 × IQ4_NL `PROJFIX` shards (93 GiB) + `mtp-…-shared-Q8_0.gguf` draft (2.8 GiB) + `mmproj-BF16.gguf` vision projector (0.9 GiB, served only if `MMPROJ_FILE` asks for it) |
@@ -208,8 +227,10 @@ tools the installer expects — which is why the container can build without eve
 manager. The image also holds the upstream installer (`install.sh`) and its `flash-next` front end
 under `/opt/strix-halo/`, downloaded from `pwilkin/strix-halo` at build time (not checked into this
 repo); pin a commit with `STRIX_HALO_REF=<sha> ./setup.sh`. That download is invalidated by a
-`BUILD_ID` build arg on every `./setup.sh -u` run, so it always reflects upstream without a
-full `--no-cache` rebuild — see [the update guide](#2-update-guide).
+`BUILD_ID` build arg, fresh on every `./setup.sh -u` run and reused afterwards from
+`.strix-build-id`, so it reflects upstream without a full `--no-cache` rebuild — see
+[the update guide](#2-update-guide). The build context is kept small by `.dockerignore` (read by
+podman too): nothing is copied into the image, so neither the weights nor `.env` go to the daemon.
 
 ## 7. Build the stack and download weights
 
@@ -229,7 +250,9 @@ installer from `/opt/strix-halo/`. In order it:
 from `<STRIX_MODEL_DIR>/.cache/huggingface` (delete it to restart a shard from scratch), and any
 file already present is hash-checked instead of re-downloaded. Launchers are written only at step 6,
 so the server cannot start until one run finishes cleanly. Extra flags go to the installer:
-`./setup.sh --jobs 8`.
+`./setup.sh --jobs 8`. When incremental stops being enough — a binary that does not match its
+pins, a CMake cache from an older flag set — `./setup.sh --rebuild-state` compiles the three trees
+from scratch and keeps everything else.
 
 ### Bringing your own weights
 
@@ -418,7 +441,10 @@ the host filesystem.
 | `serve.sh: … config.sh not found` | Stack is built only up to the download step; finish a `setup` run. |
 | Port 8080 already in use | Change `STRIX_PORT`. |
 | Rebuild "succeeded" but the pins are unchanged | The installer layer came from the cache. Rebuild with `./setup.sh -u` (it passes a fresh `BUILD_ID`), or `docker compose build --no-cache setup`. |
-| Weird symbol errors after a build that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo` and rebuild from scratch. |
+| `setup.sh: the image pins older commits than the stack in …` | The image moved behind the build in `STRIX_STATE_DIR` (`STEP BACK` in the `pins ->` line). `./setup.sh -u` for current upstream pins; `STRIX_HALO_REF=<installer-sha> ./setup.sh` if the move back is what you want. |
+| `serve.sh: WARNING the built stack and this image disagree` | `:latest` was re-pointed since the last build (or the state dir was swapped). Rerun `./setup.sh` to compile what the image pins, or `./setup.sh --rebuild-state` if the binaries look stale. |
+| Build is up to date but behaves like the old code | `./setup.sh --rebuild-state`: it drops `build/` and `runtime/` and compiles ROCr, HIP and llama.cpp from scratch, keeping the checkouts, venv and weights. |
+| Weird symbol errors after a build that pulled a new ROCm | Versioned paths (`/opt/rocm/core-10.0`) are baked into the generated launchers. Rerun `setup`; if it persists, `./setup.sh --rebuild-state`, and only then delete `STRIX_STATE_DIR/.local/share/qwen3.8-strix-halo`. |
 
 ## 13. Reference
 
@@ -426,6 +452,8 @@ the host filesystem.
 Dockerfile              Fedora 44 + AMD ROCm 10.0 gfx1151 SDK + build dependencies
 compose.yaml            setup (profile "setup") and server services
 .env / .env.example     host paths, port, credentials, launcher knobs, weight overrides
+.strix-build-id         last BUILD_ID used, so plain runs do not fall back to a cached installer
+.dockerignore           keeps weights, state and .env out of the build context
 setup.sh              host entry point: build the image, compile the stack, download the weights
 run.sh                host entry point: serve with the .env settings (detached; --no-detach)
 scripts/serve.sh      entrypoint of the `server` service; tuned launch + weight overrides
@@ -445,6 +473,8 @@ Inside the container:
   runtime/{rocr,hip}                                    the custom libhsa-runtime64 / libamdhip64
   venv/                                                 build + downloader Python environment
   cache/huggingface                                     HF/xet cache
+  config.sh                                             what serve.sh reads: engine + pinned weights
+  pins.env                                              pins stamped by ./setup.sh, checked by serve.sh
 /opt/rocm → /opt/rocm/core-10.0                         AMD SDK; never modified at runtime
 ```
 
