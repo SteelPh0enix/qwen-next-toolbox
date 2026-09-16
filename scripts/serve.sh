@@ -101,7 +101,8 @@ if ((${#spec_types[@]})); then
   fi
 fi
 if [[ -n $mmproj ]]; then
-  args+=(--mmproj "$mmproj" --mmproj-device ROCm0)
+  # Qwen-VL needs >=1024 image tokens for grounding; below that llama-server warns and accuracy suffers.
+  args+=(--mmproj "$mmproj" --mmproj-device ROCm0 --image-min-tokens 1024)
 fi
 
 exec "$STRIX_GENERIC_WRAPPER" "${args[@]}" "$@"

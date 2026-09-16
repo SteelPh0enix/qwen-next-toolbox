@@ -289,7 +289,8 @@ per-layer embedding table out of the resident set), `f16` KV, 262144-token conte
 default; upstream's launcher ships 65536), 16384 batch and ubatch, `--jinja`, `--alias` (see
 [section 10](#10-tuning)), MTP speculation with draft width 3 on the same device plus draftless
 `ngram-mod` speculation. The vision projector is off by default (`MMPROJ_FILE=none` in `.env`) because
-it crashes `llama-server`; an empty or set `MMPROJ_FILE` adds `--mmproj`/`--mmproj-device ROCm0`. It
+it crashes `llama-server`; an empty or set `MMPROJ_FILE` adds `--mmproj`/`--mmproj-device ROCm0` plus
+`--image-min-tokens 1024`, the floor Qwen-VL needs for grounding. It
 reads the engine and pinned-weight paths from `state/.local/share/qwen3.8-strix-halo/config.sh` and
 never re-derives them.
 
